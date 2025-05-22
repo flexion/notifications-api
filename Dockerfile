@@ -33,6 +33,7 @@ RUN echo "__git_commit__ = \"${GIT_COMMIT}\"" > app/version.py && \
     echo "__time__ = \"$(date +%Y-%m-%d:%H:%M:%S)\"" >> app/version.py
 
 # Install dependencies (no dev dependencies for smaller image)
+RUN poetry lock
 RUN poetry install --only main --no-interaction
 
 # Final stage
@@ -60,24 +61,9 @@ COPY --from=builder /app/app/version.py /app/app/version.py
 # Explicitly install honcho (it's in dev dependencies but we need it for runtime)
 RUN pip install honcho==2.0.0
 
-# Set environment variables
+# env vars that never change aka, we can leave them in this file
 ENV FLASK_APP=application.py
-ENV REDIS_ENABLED=1
-ENV NOTIFY_ENVIRONMENT=development
 ENV NOTIFY_APP_NAME=api
-ENV API_HOST_NAME=http://localhost:6011
-ENV WERKZEUG_DEBUG_PIN=off
-
-# Default test user account for local development
-ENV NOTIFY_E2E_TEST_EMAIL=example@fake.gov
-ENV NOTIFY_E2E_TEST_PASSWORD=testpassword
-
-# Create database user for PostgreSQL connection
-ENV DATABASE_URL=postgresql://postgres:postgres@db:5432/notification_api
-ENV SQLALCHEMY_DATABASE_TEST_URI=postgresql://postgres:postgres@db:5432/test_notification_api
-
-# Set Redis URL to connect to Redis container
-ENV REDIS_URL=redis://redis:6379
 
 # Expose the port the app runs on
 EXPOSE 6011
