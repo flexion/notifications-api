@@ -80,14 +80,14 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
 # Create a script to initialize the database and start the application
 RUN echo '#!/bin/bash\n\
 echo "Waiting for PostgreSQL to be ready..."\n\
-until PGPASSWORD=postgres psql -h db -U postgres -c "SELECT 1" > /dev/null 2>&1; do\n\
+until psql -c "SELECT 1" > /dev/null 2>&1; do\n\
   echo "PostgreSQL is unavailable - sleeping 1 second"\n\
   sleep 1\n\
 done\n\
 \n\
 echo "Creating databases if they do not exist..."\n\
-PGPASSWORD=postgres psql -h db -U postgres -c "CREATE DATABASE notification_api;" 2>/dev/null || echo "notification_api database already exists"\n\
-PGPASSWORD=postgres psql -h db -U postgres -c "CREATE DATABASE test_notification_api;" 2>/dev/null || echo "test_notification_api database already exists"\n\
+psql -c "CREATE DATABASE notification_api;" 2>/dev/null || echo "notification_api database already exists"\n\
+psql -c "CREATE DATABASE test_notification_api;" 2>/dev/null || echo "test_notification_api database already exists"\n\
 \n\
 echo "Running database migrations..."\n\
 flask db upgrade\n\
