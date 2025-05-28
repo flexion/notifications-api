@@ -4,6 +4,7 @@ from time import monotonic
 
 import botocore
 import phonenumbers
+from os import getenv
 from boto3 import client
 
 from app.clients import AWS_CLIENT_CONFIG
@@ -29,9 +30,9 @@ class AwsSnsClient(SmsClient):
         else:
             self._client = client(
                 "sns",
-                region_name=cloud_config.sns_region,
-                aws_access_key_id=cloud_config.sns_access_key,
-                aws_secret_access_key=cloud_config.sns_secret_key,
+                region_name=getenv("SNS_AWS_REGION"),
+                aws_access_key_id=getenv("SNS_AWS_ACCESS_KEY_ID"),
+                aws_secret_access_key= getenv("SNS_AWS_SECRET_ACCESS_KEY"),
                 config=AWS_CLIENT_CONFIG,
             )
 
