@@ -74,32 +74,20 @@ def clean_cache():
 def get_s3_client():
     global s3_client
     if s3_client is None:
-        access_key = current_app.config["CSV_UPLOAD_BUCKET"]["access_key_id"]
-        secret_key = current_app.config["CSV_UPLOAD_BUCKET"]["secret_access_key"]
         region = current_app.config["CSV_UPLOAD_BUCKET"]["region"]
         session = Session(
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
             region_name=region,
-            aws_session_token=getenv("AWS_SESSION_TOKEN")
         )
         s3_client = session.client("s3", config=AWS_CLIENT_CONFIG)
-        current_app.logger.debug(f"Access Key: {access_key}, Secret Key: {secret_key}, Region: {region}")    
-        current_app.logger.debug(f"s3_client created: {s3_client.__class__.__name__} - {s3_client.meta.endpoint_url}")
     return s3_client
 
 
 def get_s3_resource():
     global s3_resource
     if s3_resource is None:
-        access_key = current_app.config["CSV_UPLOAD_BUCKET"]["access_key_id"]
-        secret_key = current_app.config["CSV_UPLOAD_BUCKET"]["secret_access_key"]
         region = current_app.config["CSV_UPLOAD_BUCKET"]["region"]
         session = Session(
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
             region_name=region,
-            aws_session_token=os.getenv("AWS_SESSION_TOKEN")
         )
         s3_resource = session.resource("s3", config=AWS_CLIENT_CONFIG)
     return s3_resource
@@ -253,13 +241,13 @@ def get_s3_files():
     )
 
 
-def get_s3_file(bucket_name, file_location, access_key, secret_key, region):
-    s3_file = get_s3_object(bucket_name, file_location, access_key, secret_key, region)
+def get_s3_file(bucket_name, file_location, region):
+    s3_file = get_s3_object(bucket_name, file_location, region)
     return s3_file.get()["Body"].read().decode("utf-8")
 
 
 def download_from_s3(
-    bucket_name, s3_key, local_filename, access_key, secret_key, region
+    bucket_name, s3_key, local_filename, region
 ):
 
     s3 = get_s3_client()
@@ -280,7 +268,7 @@ def download_from_s3(
     return result
 
 
-def get_s3_object(bucket_name, file_location, access_key, secret_key, region):
+def get_s3_object(bucket_name, file_location, region):
 
     s3 = get_s3_resource()
     try:
@@ -291,7 +279,7 @@ def get_s3_object(bucket_name, file_location, access_key, secret_key, region):
         )
 
 
-def purge_bucket(bucket_name, access_key, secret_key, region):
+def purge_bucket(bucket_name, region):
     s3 = get_s3_resource()
     bucket = s3.Bucket(bucket_name)
     bucket.objects.all().delete()
@@ -299,14 +287,12 @@ def purge_bucket(bucket_name, access_key, secret_key, region):
 
 def file_exists(file_location):
     bucket_name = current_app.config["CSV_UPLOAD_BUCKET"]["bucket"]
-    access_key = current_app.config["CSV_UPLOAD_BUCKET"]["access_key_id"]
-    secret_key = current_app.config["CSV_UPLOAD_BUCKET"]["secret_access_key"]
     region = current_app.config["CSV_UPLOAD_BUCKET"]["region"]
 
     try:
         # try and access metadata of object
         get_s3_object(
-            bucket_name, file_location, access_key, secret_key, region
+            bucket_name, file_location, region
         ).metadata
         return True
     except botocore.exceptions.ClientError as e:
@@ -322,8 +308,6 @@ def get_job_location(service_id, job_id):
     return (
         current_app.config["CSV_UPLOAD_BUCKET"]["bucket"],
         NEW_FILE_LOCATION_STRUCTURE.format(service_id, job_id),
-        current_app.config["CSV_UPLOAD_BUCKET"]["access_key_id"],
-        current_app.config["CSV_UPLOAD_BUCKET"]["secret_access_key"],
         current_app.config["CSV_UPLOAD_BUCKET"]["region"],
     )
 
@@ -340,8 +324,6 @@ def get_old_job_location(service_id, job_id):
     return (
         current_app.config["CSV_UPLOAD_BUCKET"]["bucket"],
         FILE_LOCATION_STRUCTURE.format(service_id, job_id),
-        current_app.config["CSV_UPLOAD_BUCKET"]["access_key_id"],
-        current_app.config["CSV_UPLOAD_BUCKET"]["secret_access_key"],
         current_app.config["CSV_UPLOAD_BUCKET"]["region"],
     )
 
@@ -544,8 +526,8 @@ def remove_job_from_s3(service_id, job_id):
     return remove_s3_object(*get_job_location(service_id, job_id))
 
 
-def remove_s3_object(bucket_name, object_key, access_key, secret_key, region):
-    obj = get_s3_object(bucket_name, object_key, access_key, secret_key, region)
+def remove_s3_object(bucket_name, object_key, region):
+    obj = get_s3_object(bucket_name, object_key, region)
     return obj.delete()
 
 
@@ -553,8 +535,6 @@ def remove_csv_object(object_key):
     obj = get_s3_object(
         current_app.config["CSV_UPLOAD_BUCKET"]["bucket"],
         object_key,
-        current_app.config["CSV_UPLOAD_BUCKET"]["access_key_id"],
-        current_app.config["CSV_UPLOAD_BUCKET"]["secret_access_key"],
         current_app.config["CSV_UPLOAD_BUCKET"]["region"],
     )
     return obj.delete()

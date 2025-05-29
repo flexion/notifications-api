@@ -22,8 +22,6 @@ class AwsSnsClient(SmsClient):
             self._client = client(
                 "sns",
                 region_name=cloud_config.sns_region,
-                aws_access_key_id=cloud_config.sns_access_key,
-                aws_secret_access_key=cloud_config.sns_secret_key,
                 config=AWS_CLIENT_CONFIG,
                 endpoint_url=os.getenv("LOCALSTACK_ENDPOINT_URL"),
             )
@@ -31,9 +29,6 @@ class AwsSnsClient(SmsClient):
             self._client = client(
                 "sns",
                 region_name=getenv("SNS_AWS_REGION"),
-                aws_access_key_id=getenv("SNS_AWS_ACCESS_KEY_ID"),
-                aws_secret_access_key= getenv("SNS_AWS_SECRET_ACCESS_KEY"),
-                aws_session_token= getenv("AWS_SESSION_TOKEN"),
                 config=AWS_CLIENT_CONFIG,
             )
 

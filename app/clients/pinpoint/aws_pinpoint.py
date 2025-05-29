@@ -13,8 +13,6 @@ class AwsPinpointClient(Client):
         self._client = client(
             "pinpoint",
             region_name=cloud_config.sns_region,
-            aws_access_key_id=cloud_config.sns_access_key,
-            aws_secret_access_key=cloud_config.sns_secret_key,
             config=AWS_CLIENT_CONFIG,
         )
 

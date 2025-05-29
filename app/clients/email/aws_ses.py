@@ -62,8 +62,6 @@ class AwsSesClient(EmailClient):
         self._client = client(
             "ses",
             region_name=cloud_config.ses_region,
-            aws_access_key_id=cloud_config.ses_access_key,
-            aws_secret_access_key=cloud_config.ses_secret_key,
             config=AWS_CLIENT_CONFIG,
         )
         super(AwsSesClient, self).__init__(*args, **kwargs)

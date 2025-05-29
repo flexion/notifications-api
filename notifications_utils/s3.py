@@ -20,8 +20,7 @@ AWS_CLIENT_CONFIG = Config(
 # Global variable
 noti_s3_resource = None
 
-default_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
-default_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+
 default_region = os.environ.get("AWS_REGION")
 
 
@@ -29,10 +28,7 @@ def get_s3_resource():
     global noti_s3_resource
     if noti_s3_resource is None:
         session = Session(
-            aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
             region_name=os.environ.get("AWS_REGION"),
-            aws_session_token=os.getenv("AWS_SESSION_TOKEN")
         )
         noti_s3_resource = session.resource("s3", config=AWS_CLIENT_CONFIG)
     return noti_s3_resource
@@ -46,8 +42,6 @@ def s3upload(
     content_type="binary/octet-stream",
     tags=None,
     metadata=None,
-    access_key=default_access_key_id,
-    secret_key=default_secret_access_key,
 ):
     _s3 = get_s3_resource()
 
@@ -81,8 +75,6 @@ def s3download(
     bucket_name,
     filename,
     region=default_region,
-    access_key=default_access_key_id,
-    secret_key=default_secret_access_key,
 ):
     try:
         s3 = get_s3_resource()

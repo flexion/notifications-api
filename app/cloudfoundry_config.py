@@ -9,8 +9,6 @@ class CloudfoundryConfig:
         self.s3_buckets = {bucket["name"]: bucket["credentials"] for bucket in buckets}
         self._empty_bucket_credentials = {
             "bucket": "",
-            "access_key_id": "",
-            "secret_access_key": "",
             "region": "",
         }
 
@@ -53,34 +51,6 @@ class CloudfoundryConfig:
             return self._ses_credentials("region")
         except KeyError:
             return getenv("SES_AWS_REGION", "us-west-1")
-
-    @property
-    def ses_access_key(self):
-        try:
-            return self._ses_credentials("smtp_user")
-        except KeyError:
-            return getenv("SES_AWS_ACCESS_KEY_ID")
-
-    @property
-    def ses_secret_key(self):
-        try:
-            return self._ses_credentials("secret_access_key")
-        except KeyError:
-            return getenv("SES_AWS_SECRET_ACCESS_KEY")
-
-    @property
-    def sns_access_key(self):
-        try:
-            return self._sns_credentials("aws_access_key_id")
-        except KeyError:
-            return getenv("SNS_AWS_ACCESS_KEY_ID")
-
-    @property
-    def sns_secret_key(self):
-        try:
-            return self._sns_credentials("aws_secret_access_key")
-        except KeyError:
-            return getenv("SNS_AWS_SECRET_ACCESS_KEY")
 
     @property
     def sns_region(self):

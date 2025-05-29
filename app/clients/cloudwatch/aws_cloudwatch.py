@@ -19,8 +19,6 @@ class AwsCloudwatchClient(Client):
             self._client = client(
                 "logs",
                 region_name=cloud_config.sns_region,
-                aws_access_key_id=cloud_config.sns_access_key,
-                aws_secret_access_key=cloud_config.sns_secret_key,
                 config=AWS_CLIENT_CONFIG,
                 endpoint_url=os.getenv("LOCALSTACK_ENDPOINT_URL"),
             )
@@ -29,8 +27,6 @@ class AwsCloudwatchClient(Client):
             self._client = client(
                 "logs",
                 region_name=cloud_config.sns_region,
-                aws_access_key_id=cloud_config.sns_access_key,
-                aws_secret_access_key=cloud_config.sns_secret_key,
                 config=AWS_CLIENT_CONFIG,
             )
             self._is_localstack = False
