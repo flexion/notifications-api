@@ -12,7 +12,7 @@ AWS_CLIENT_CONFIG = Config(
     s3={
         "addressing_style": "virtual",
     },
-    use_fips_endpoint=True,
+    # use_fips_endpoint=True,
     max_pool_connections=50,  # This should be equal or greater than our celery concurrency
 )
 

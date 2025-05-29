@@ -1,5 +1,7 @@
 import csv
 import datetime
+from os import getenv
+import os
 import re
 import time
 from io import StringIO
@@ -79,8 +81,11 @@ def get_s3_client():
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
             region_name=region,
+            aws_session_token=getenv("AWS_SESSION_TOKEN")
         )
         s3_client = session.client("s3", config=AWS_CLIENT_CONFIG)
+        current_app.logger.debug(f"Access Key: {access_key}, Secret Key: {secret_key}, Region: {region}")    
+        current_app.logger.debug(f"s3_client created: {s3_client.__class__.__name__} - {s3_client.meta.endpoint_url}")
     return s3_client
 
 
@@ -94,6 +99,7 @@ def get_s3_resource():
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
             region_name=region,
+            aws_session_token=os.getenv("AWS_SESSION_TOKEN")
         )
         s3_resource = session.resource("s3", config=AWS_CLIENT_CONFIG)
     return s3_resource
@@ -106,9 +112,11 @@ def _get_bucket_name():
 def list_s3_objects():
 
     bucket_name = _get_bucket_name()
+    current_app.logger.debug(f"bucket_name: {bucket_name}")
     s3_client = get_s3_client()
     # Our reports only support 7 days, but pull 8 days to avoid
     # any edge cases
+
     time_limit = aware_utcnow() - datetime.timedelta(days=8)
     try:
         response = s3_client.list_objects_v2(Bucket=bucket_name)

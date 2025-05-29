@@ -14,7 +14,7 @@ AWS_CLIENT_CONFIG = Config(
         "addressing_style": "virtual",
     },
     max_pool_connections=50,
-    use_fips_endpoint=True,
+    # use_fips_endpoint=True,
 )
 
 # Global variable
@@ -32,6 +32,7 @@ def get_s3_resource():
             aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
             aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
             region_name=os.environ.get("AWS_REGION"),
+            aws_session_token=os.getenv("AWS_SESSION_TOKEN")
         )
         noti_s3_resource = session.resource("s3", config=AWS_CLIENT_CONFIG)
     return noti_s3_resource

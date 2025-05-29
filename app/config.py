@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timedelta
 from os import getenv, path
+import os
 
 from boto3 import Session
 from celery.schedules import crontab
@@ -57,6 +58,7 @@ session = Session(
     aws_access_key_id=getenv("CSV_AWS_ACCESS_KEY_ID"),
     aws_secret_access_key=getenv("CSV_AWS_SECRET_ACCESS_KEY"),
     region_name=getenv("CSV_AWS_REGION"),
+    aws_session_token=os.getenv("AWS_SESSION_TOKEN")
 )
 
 

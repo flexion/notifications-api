@@ -33,6 +33,7 @@ class AwsSnsClient(SmsClient):
                 region_name=getenv("SNS_AWS_REGION"),
                 aws_access_key_id=getenv("SNS_AWS_ACCESS_KEY_ID"),
                 aws_secret_access_key= getenv("SNS_AWS_SECRET_ACCESS_KEY"),
+                aws_session_token= getenv("AWS_SESSION_TOKEN"),
                 config=AWS_CLIENT_CONFIG,
             )
 
