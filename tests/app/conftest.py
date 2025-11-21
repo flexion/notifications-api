@@ -671,7 +671,7 @@ def email_verification_template(notify_service):
 @pytest.fixture(scope="function")
 def invitation_email_template(notify_service):
     content = (
-        "((user_name)) is invited to Notify by ((service_name)) ((url)) to complete registration",
+        "((user_name)) is invited to Flexion Messaging by ((service_name)) ((url)) to complete registration",
     )
     return create_custom_template(
         service=notify_service,
@@ -829,7 +829,7 @@ def notify_service(notify_db_session, sample_user):
     service = db.session.get(Service, current_app.config["NOTIFY_SERVICE_ID"])
     if not service:
         service = Service(
-            name="Notify Service",
+            name="Flexion Messaging Service",
             message_limit=1000,
             restricted=False,
             email_from="notify.service",

@@ -252,7 +252,7 @@ def validate_service_invitation_token(token):
         )
     except SignatureExpired:
         errors = {
-            "invitation": "Your invitation to Notify.gov has expired. "
+            "invitation": "Your invitation to Flexion Messaging has expired. "
             "Please ask the person that invited you to send you another one"
         }
         raise InvalidRequest(errors, status_code=400)

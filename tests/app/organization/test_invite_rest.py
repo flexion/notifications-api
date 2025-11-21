@@ -18,7 +18,7 @@ from tests.app.db import create_invited_org_user
 
 @pytest.mark.parametrize(
     "platform_admin, expected_invited_by",
-    ((True, "The Notify.gov team"), (False, "Test User")),
+    ((True, "The Flexion Messaging team"), (False, "Test User")),
 )
 @pytest.mark.parametrize(
     "extra_args, expected_start_of_invite_url",
@@ -257,7 +257,7 @@ def test_validate_invitation_token_for_expired_token_returns_400(client):
     json_resp = json.loads(response.get_data(as_text=True))
     assert json_resp["result"] == "error"
     assert json_resp["message"] == {
-        "invitation": "Your invitation to Notify.gov has expired. "
+        "invitation": "Your invitation to Flexion Messaging has expired. "
         "Please ask the person that invited you to send you another one"
     }
 
