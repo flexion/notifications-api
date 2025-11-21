@@ -63,7 +63,7 @@ def invite_user_to_org(organization_id):
 
     personalisation = {
         "user_name": (
-            "The Notify.gov team"
+            "The Flexion Messaging team"
             if invited_org_user.invited_by.platform_admin
             else invited_org_user.invited_by.name
         ),
@@ -165,7 +165,7 @@ def validate_invitation_token(token):
         )
     except SignatureExpired:
         errors = {
-            "invitation": "Your invitation to Notify.gov has expired. "
+            "invitation": "Your invitation to Flexion Messaging has expired. "
             "Please ask the person that invited you to send you another one"
         }
         raise InvalidRequest(errors, status_code=400)

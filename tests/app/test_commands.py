@@ -404,7 +404,7 @@ def test_update_template(notify_db_session, email_2fa_code_template):
         "Example text message template!",
         TemplateType.SMS,
         [
-            "Hi, I’m trying out Notify.gov! Today is ((day of week)) and my favorite color is ((color))."
+            "Hi, I'm trying out Flexion Messaging! Today is ((day of week)) and my favorite color is ((color))."
         ],
         "",
     )

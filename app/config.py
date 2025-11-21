@@ -407,7 +407,7 @@ class Production(Config):
         f"notify-api-csv-upload-bucket-{Config.NOTIFY_ENVIRONMENT}"
     )
 
-    FROM_NUMBER = "Notify.gov"
+    FROM_NUMBER = "Flexion Messaging"
     CRONITOR_ENABLED = True
 
 
