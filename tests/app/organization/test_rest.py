@@ -2,8 +2,9 @@ import uuid
 from unittest.mock import Mock
 
 import pytest
-from flask import current_app
 from freezegun import freeze_time
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -193,29 +194,6 @@ def _get_organizations():
     return db.session.execute(stmt).scalars().all()
 
 
-@pytest.mark.parametrize("org_type", ["nhs_central", "nhs_local", "nhs_gp"])
-@pytest.mark.skip(reason="Update for TTS")
-def test_post_create_organization_sets_default_nhs_branding_for_nhs_orgs(
-    admin_request, notify_db_session, nhs_email_branding, org_type
-):
-    data = {
-        "name": "test organization",
-        "active": True,
-        "organization_type": org_type,
-    }
-
-    admin_request.post(
-        "organization.create_organization", _data=data, _expected_status=201
-    )
-
-    organizations = _get_organizations()
-
-    assert len(organizations) == 1
-    assert organizations[0].email_branding_id == uuid.UUID(
-        current_app.config["NHS_EMAIL_BRANDING_ID"]
-    )
-
-
 def test_post_create_organization_existing_name_raises_400(
     admin_request, sample_organization
 ):
@@ -299,6 +277,28 @@ def test_post_create_organization_with_missing_data_gives_validation_error(
     assert response["errors"][0]["message"] == expected_error
 
 
+@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(
+    fuzzed_name=st.one_of(st.none(), st.text(min_size=1, max_size=2000)),
+    fuzzed_active=st.one_of(st.none(), st.booleans()),
+    fuzzed_organization_type=st.one_of(st.none(), st.text(min_size=1, max_size=2000)),
+)
+def test_fuzz_post_create_organization_with_missing_data_gives_validation_error(
+    admin_request, fuzzed_name, fuzzed_active, fuzzed_organization_type
+):
+    data = {
+        "name": fuzzed_name,
+        "active": fuzzed_active,
+        "organization_type": fuzzed_organization_type,
+    }
+    response = admin_request.post(
+        "organization.create_organization", _data=data, _expected_status=400
+    )
+
+    assert len(response["errors"]) > 0
+    assert response["errors"][0]["error"] == "ValidationError"
+
+
 def test_post_update_organization_updates_fields(
     admin_request,
     notify_db_session,
@@ -371,61 +371,6 @@ def test_update_other_organization_attributes_doesnt_clear_domains(
     )
 
     assert [domain.domain for domain in org.domains] == ["example.gov.uk"]
-
-
-@pytest.mark.parametrize("new_org_type", ["nhs_central", "nhs_local", "nhs_gp"])
-@pytest.mark.skip(reason="Update for TTS")
-def test_post_update_organization_to_nhs_type_updates_branding_if_none_present(
-    admin_request, nhs_email_branding, notify_db_session, new_org_type
-):
-    org = create_organization(organization_type="central")
-    data = {
-        "organization_type": new_org_type,
-    }
-
-    admin_request.post(
-        "organization.update_organization",
-        _data=data,
-        organization_id=org.id,
-        _expected_status=204,
-    )
-
-    organization = _get_organizations()
-
-    assert len(organization) == 1
-    assert organization[0].id == org.id
-    assert organization[0].organization_type == new_org_type
-    assert organization[0].email_branding_id == uuid.UUID(
-        current_app.config["NHS_EMAIL_BRANDING_ID"]
-    )
-
-
-@pytest.mark.parametrize("new_org_type", ["nhs_central", "nhs_local", "nhs_gp"])
-@pytest.mark.skip(reason="Update for TTS")
-def test_post_update_organization_to_nhs_type_does_not_update_branding_if_default_branding_set(
-    admin_request, nhs_email_branding, notify_db_session, new_org_type
-):
-    current_branding = create_email_branding(logo="example.png", name="custom branding")
-    org = create_organization(
-        organization_type="central", email_branding_id=current_branding.id
-    )
-    data = {
-        "organization_type": new_org_type,
-    }
-
-    admin_request.post(
-        "organization.update_organization",
-        _data=data,
-        organization_id=org.id,
-        _expected_status=204,
-    )
-
-    organization = _get_organizations()
-
-    assert len(organization) == 1
-    assert organization[0].id == org.id
-    assert organization[0].organization_type == new_org_type
-    assert organization[0].email_branding_id == current_branding.id
 
 
 def test_update_organization_default_branding(
@@ -855,7 +800,7 @@ def test_get_organization_services_usage(admin_request, notify_db_session):
     response = admin_request.get(
         "organization.get_organization_services_usage",
         organization_id=org.id,
-        **{"year": 2019}
+        **{"year": 2019},
     )
     assert len(response) == 1
     assert len(response["services"]) == 1
@@ -893,7 +838,7 @@ def test_get_organization_services_usage_sort_active_first(
     response = admin_request.get(
         "organization.get_organization_services_usage",
         organization_id=org.id,
-        **{"year": 2019}
+        **{"year": 2019},
     )
     assert len(response) == 1
     assert len(response["services"]) == 2
@@ -910,7 +855,7 @@ def test_get_organization_services_usage_sort_active_first(
     response_after_archive = admin_request.get(
         "organization.get_organization_services_usage",
         organization_id=org.id,
-        **{"year": 2019}
+        **{"year": 2019},
     )
     first_service = response_after_archive["services"][0]
     assert first_service["service_id"] == str(service.id)
@@ -927,7 +872,7 @@ def test_get_organization_services_usage_returns_400_if_year_is_invalid(admin_re
         "organization.get_organization_services_usage",
         organization_id=uuid.uuid4(),
         **{"year": "not-a-valid-year"},
-        _expected_status=400
+        _expected_status=400,
     )
     assert response["message"] == "No valid year provided"
 
@@ -983,3 +928,112 @@ def test_missing_both():
             {"org_id": ["Can't be empty"]},
             {"name": ["Can't be empty"]},
         ]
+
+
+@freeze_time("2025-01-15 10:00:00")
+def test_get_organization_message_allowance(admin_request, sample_organization, mocker):
+    service_1 = create_service(service_name="Service 1")
+    service_2 = create_service(service_name="Service 2")
+
+    service_1.total_message_limit = 100000
+    service_2.total_message_limit = 50000
+
+    dao_add_service_to_organization(service_1, sample_organization.id)
+    dao_add_service_to_organization(service_2, sample_organization.id)
+
+    mock_get_counts = mocker.patch(
+        "app.organization.rest.dao_get_notification_counts_per_service"
+    )
+    mock_get_counts.return_value = {
+        service_1.id: 30000,
+        service_2.id: 20000,
+    }
+
+    response = admin_request.get(
+        "organization.get_organization_message_allowance",
+        organization_id=sample_organization.id,
+        _expected_status=200,
+    )
+
+    assert response["messages_sent"] == 50000
+    assert response["messages_remaining"] == 100000
+    assert response["total_message_limit"] == 150000
+
+    assert mock_get_counts.call_count == 1
+    mock_get_counts.assert_called_once()
+    args, _ = mock_get_counts.call_args
+    assert set(args[0]) == {service_1.id, service_2.id}
+    assert args[1] == 2025
+
+
+def test_get_organization_message_allowance_no_services(
+    admin_request, sample_organization
+):
+    response = admin_request.get(
+        "organization.get_organization_message_allowance",
+        organization_id=sample_organization.id,
+        _expected_status=200,
+    )
+
+    assert response["messages_sent"] == 0
+    assert response["messages_remaining"] == 0
+    assert response["total_message_limit"] == 0
+
+
+def test_get_organization_message_allowance_invalid_org_id(admin_request):
+    fake_uuid = "00000000-0000-0000-0000-000000000000"
+    admin_request.get(
+        "organization.get_organization_message_allowance",
+        organization_id=fake_uuid,
+        _expected_status=404,
+    )
+
+
+def test_get_organization_dashboard(admin_request, mocker):
+    org_id = uuid.uuid4()
+    service_id = uuid.uuid4()
+
+    mock_usage = mocker.patch("app.organization.rest.fetch_usage_year_for_organization")
+    mock_usage.return_value = {
+        service_id: {
+            "service_id": service_id,
+            "service_name": "Test Service",
+            "active": True,
+            "restricted": False,
+            "emails_sent": 100,
+            "sms_billable_units": 5,
+            "sms_remainder": 245,
+            "sms_cost": 1.50,
+            "free_sms_limit": 250,
+            "chargeable_billable_sms": 0,
+        }
+    }
+
+    mock_templates = mocker.patch("app.organization.rest.dao_get_recent_sms_template_per_service")
+    mock_templates.return_value = {service_id: "Welcome SMS"}
+
+    mock_contacts = mocker.patch("app.organization.rest.dao_get_service_primary_contacts")
+    mock_contacts.return_value = {service_id: "billing@example.com"}
+
+    response = admin_request.get(
+        "organization.get_organization_dashboard",
+        organization_id=org_id,
+        **{"year": 2025},
+    )
+
+    assert len(response["services"]) == 1
+    service_data = response["services"][0]
+
+    assert service_data["service_id"] == str(service_id)
+    assert service_data["service_name"] == "Test Service"
+    assert service_data["active"] is True
+    assert service_data["restricted"] is False
+    assert service_data["sms_billable_units"] == 5
+    assert service_data["free_sms_limit"] == 250
+    assert service_data["sms_remainder"] == 245
+    assert service_data["recent_sms_template_name"] == "Welcome SMS"
+    assert service_data["primary_contact"] == "billing@example.com"
+
+    mock_usage.assert_called_once_with(org_id, 2025, include_all_services=True)
+    mock_templates.assert_called_once_with([service_id])
+    mock_contacts.assert_called_once_with([service_id])

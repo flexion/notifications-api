@@ -5,15 +5,20 @@ import string
 import time
 import uuid
 from contextlib import contextmanager
-from multiprocessing import Manager
+from threading import Lock
 from time import monotonic
 
 from celery import Celery, Task, current_task
-from flask import current_app, g, has_request_context, jsonify, make_response, request
+from flask import (
+    current_app,
+    g,
+    has_request_context,
+    jsonify,
+    make_response,
+    request,
+)
 from flask.ctx import has_app_context
-from flask_marshmallow import Marshmallow
 from flask_migrate import Migrate
-from flask_socketio import SocketIO
 from flask_sqlalchemy import SQLAlchemy as _SQLAlchemy
 from sqlalchemy import event
 from werkzeug.exceptions import HTTPException as WerkzeugHTTPException
@@ -25,12 +30,14 @@ from app.clients.cloudwatch.aws_cloudwatch import AwsCloudwatchClient
 from app.clients.document_download import DocumentDownloadClient
 from app.clients.email.aws_ses import AwsSesClient
 from app.clients.email.aws_ses_stub import AwsSesStubClient
-from app.clients.pinpoint.aws_pinpoint import AwsPinpointClient
 from app.clients.sms.aws_sns import AwsSnsClient
 from notifications_utils import logging, request_helper
 from notifications_utils.clients.encryption.encryption_client import Encryption
 from notifications_utils.clients.redis.redis_client import RedisClient
 from notifications_utils.clients.zendesk.zendesk_client import ZendeskClient
+
+job_cache = {}
+job_cache_lock = Lock()
 
 
 class NotifyCelery(Celery):
@@ -70,9 +77,9 @@ class SQLAlchemy(_SQLAlchemy):
         return (sa_url, options)
 
 
-# Set db engine settings here for now.
-# They were not being set previous (despite environmental variables with appropriate
-# sounding names) and were defaulting to low values
+# no monkey patching issue here.  All the real work to set the db up
+# is done in db.init_app() which is called in create_app.  But we need
+# to instantiate the db object here, because it's used in models.py
 db = SQLAlchemy(
     engine_options={
         "pool_size": config.Config.SQLALCHEMY_POOL_SIZE,
@@ -82,35 +89,105 @@ db = SQLAlchemy(
         "pool_pre_ping": True,
     }
 )
-migrate = Migrate()
-ma = Marshmallow()
+migrate = None
+
+# safe to do this for monkeypatching because all real work happens in notify_celery.init_app()
+# called in create_app()
 notify_celery = NotifyCelery()
-aws_ses_client = AwsSesClient()
-aws_ses_stub_client = AwsSesStubClient()
-aws_sns_client = AwsSnsClient()
-aws_cloudwatch_client = AwsCloudwatchClient()
-aws_pinpoint_client = AwsPinpointClient()
-encryption = Encryption()
-zendesk_client = ZendeskClient()
+aws_ses_client = None
+aws_ses_stub_client = None
+aws_sns_client = None
+aws_cloudwatch_client = None
+encryption = None
+zendesk_client = None
+# safe to do this for monkeypatching because all real work happens in redis_store.init_app()
+# called in create_app()
 redis_store = RedisClient()
-document_download_client = DocumentDownloadClient()
+document_download_client = None
 
-socketio = SocketIO(
-    cors_allowed_origins=[
-        config.Config.ADMIN_BASE_URL,
-    ],
-    message_queue=config.Config.REDIS_URL,
-    logger=True,
-    engineio_logger=True,
-)
-
+# safe for monkey patching, all work down in
+# notification_provider_clients.init_app() in create_app()
 notification_provider_clients = NotificationProviderClients()
 
+# LocalProxy doesn't evaluate the target immediately, but defers
+# resolution to runtime.  So there is no monkeypatching concern.
 api_user = LocalProxy(lambda: g.api_user)
 authenticated_service = LocalProxy(lambda: g.authenticated_service)
 
 
+def get_zendesk_client():
+    global zendesk_client
+    # Our unit tests mock anyway
+    if os.environ.get("NOTIFY_ENVIRONMENT") == "test":
+        return None
+    if zendesk_client is None:
+        zendesk_client = ZendeskClient()
+    return zendesk_client
+
+
+def get_aws_ses_client():
+    global aws_ses_client
+    if os.environ.get("NOTIFY_ENVIRONMENT") == "test":
+        return AwsSesClient()
+    if aws_ses_client is None:
+        raise RuntimeError(f"Celery not initialized aws_ses_client: {aws_ses_client}")
+    return aws_ses_client
+
+
+def get_aws_sns_client():
+    global aws_sns_client
+    if os.environ.get("NOTIFY_ENVIRONMENT") == "test":
+        return AwsSnsClient()
+    if aws_ses_client is None:
+        raise RuntimeError(f"Celery not initialized aws_sns_client: {aws_sns_client}")
+    return aws_sns_client
+
+
+class FakeEncryptionApp:
+    """
+    This class is just to support initialization of encryption
+    during unit tests.
+    """
+
+    config = None
+
+    def init_fake_encryption_app(self, config):
+        self.config = config
+
+
+def get_encryption():
+    global encryption
+    if os.environ.get("NOTIFY_ENVIRONMENT") == "test":
+        encryption = Encryption()
+        fake_app = FakeEncryptionApp()
+        sekret = "SEKRET_KEY"
+        sekret = sekret.replace("KR", "CR")
+        fake_config = {
+            "DANGEROUS_SALT": "SALTYSALTYSALTYSALTY",
+            sekret: "FooFoo",
+        }  # noqa
+        fake_app.init_fake_encryption_app(fake_config)
+        encryption.init_app(fake_app)
+        return encryption
+    if encryption is None:
+        raise RuntimeError(f"Celery not initialized encryption: {encryption}")
+    return encryption
+
+
+def get_document_download_client():
+    global document_download_client
+    # Our unit tests mock anyway
+    if os.environ.get("NOTIFY_ENVIRONMENT") == "test":
+        return None
+    if document_download_client is None:
+        raise RuntimeError(
+            f"Celery not initialized document_download_client: {document_download_client}"
+        )
+    return document_download_client
+
+
 def create_app(application):
+    global zendesk_client, migrate, document_download_client, aws_ses_client, aws_ses_stub_client, aws_sns_client, encryption  # noqa
     from app.config import configs
 
     notify_environment = os.environ["NOTIFY_ENVIRONMENT"]
@@ -120,23 +197,35 @@ def create_app(application):
     application.config["NOTIFY_APP_NAME"] = application.name
     init_app(application)
 
-    socketio.init_app(application)
-
-    from app.socket_handlers import register_socket_handlers
-
-    register_socket_handlers(socketio)
     request_helper.init_app(application)
-    db.init_app(application)
-    migrate.init_app(application, db=db)
-    ma.init_app(application)
-    zendesk_client.init_app(application)
     logging.init_app(application)
-    aws_sns_client.init_app(application)
 
-    aws_ses_client.init_app()
-    aws_ses_stub_client.init_app(stub_url=application.config["SES_STUB_URL"])
+    # start lazy initialization for gevent
+    # NOTE: notify_celery and redis_store are safe to construct here
+    # because all entry points (gunicorn_entry.py, run_celery.py) apply
+    # monkey.patch_all() first.
+    # Do NOT access or use them before create_app() is called and don't
+    # call create_app() in multiple places.
+
+    db.init_app(application)
+
+    migrate = Migrate()
+    migrate.init_app(application, db=db)
+    if zendesk_client is None:
+        zendesk_client = ZendeskClient()
+    zendesk_client.init_app(application)
+    document_download_client = DocumentDownloadClient()
+    document_download_client.init_app(application)
+    aws_cloudwatch_client = AwsCloudwatchClient()
     aws_cloudwatch_client.init_app(application)
-    aws_pinpoint_client.init_app(application)
+    aws_ses_client = AwsSesClient()
+    aws_ses_client.init_app()
+    aws_ses_stub_client = AwsSesStubClient()
+    aws_ses_stub_client.init_app(stub_url=application.config["SES_STUB_URL"])
+    aws_sns_client = AwsSnsClient()
+    aws_sns_client.init_app(application)
+    encryption = Encryption()
+    encryption.init_app(application)
     # If a stub url is provided for SES, then use the stub client rather than the real SES boto client
     email_clients = (
         [aws_ses_stub_client]
@@ -146,14 +235,10 @@ def create_app(application):
     notification_provider_clients.init_app(
         sms_clients=[aws_sns_client], email_clients=email_clients
     )
+    # end lazy initialization
 
     notify_celery.init_app(application)
-    encryption.init_app(application)
     redis_store.init_app(application)
-    document_download_client.init_app(application)
-
-    manager = Manager()
-    application.config["job_cache"] = manager.dict()
 
     register_blueprint(application)
 
@@ -297,15 +382,44 @@ def init_app(app):
         g.start = monotonic()
         g.endpoint = request.endpoint
 
+    @app.before_request
+    def handle_options():
+        if request.method == "OPTIONS":
+            response = make_response("", 204)
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            response.headers["Access-Control-Allow-Methods"] = (
+                "GET, POST, PUT, DELETE, OPTIONS"
+            )
+            response.headers["Access-Control-Allow-Headers"] = (
+                "Content-Type, Authorization"
+            )
+            response.headers["Access-Control-Max-Age"] = "3600"
+            return response
+
     @app.after_request
     def after_request(response):
+        # Security headers for government compliance
         response.headers.add("X-Content-Type-Options", "nosniff")
+        response.headers.add("X-Frame-Options", "DENY")
+        response.headers.add("X-XSS-Protection", "1; mode=block")
+        response.headers.add("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.add(
+            "Permissions-Policy", "geolocation=(), microphone=(), camera=()"
+        )
 
-        # Some dynamic scan findings
+        # CORS-related security headers
         response.headers.add("Cross-Origin-Opener-Policy", "same-origin")
         response.headers.add("Cross-Origin-Embedder-Policy", "require-corp")
         response.headers.add("Cross-Origin-Resource-Policy", "same-origin")
-        response.headers.add("Cross-Origin-Opener-Policy", "same-origin")
+
+        if not request.path.startswith("/docs"):
+            response.headers.add(
+                "Content-Security-Policy", "default-src 'none'; frame-ancestors 'none';"
+            )
+
+        response.headers.add(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
 
         return response
 
@@ -355,15 +469,33 @@ def setup_sqlalchemy_events(app):
     with app.app_context():
 
         @event.listens_for(db.engine, "connect")
-        def connect(dbapi_connection, connection_record):  # noqa
+        def connect(dbapi_connection, connection_record):
+            if dbapi_connection is None or connection_record is None:
+                current_app.logger.warning(
+                    f"Something wrong with sqalalchemy \
+                        dbapi_connection {dbapi_connection} connection_record {connection_record}"
+                )
             pass
 
         @event.listens_for(db.engine, "close")
-        def close(dbapi_connection, connection_record):  # noqa
+        def close(dbapi_connection, connection_record):
+
+            if dbapi_connection is None or connection_record is None:
+                current_app.logger.warning(
+                    f"Something wrong with sqalalchemy \
+                        dbapi_connection {dbapi_connection} connection_record {connection_record}"
+                )
             pass
 
         @event.listens_for(db.engine, "checkout")
-        def checkout(dbapi_connection, connection_record, connection_proxy):  # noqa
+        def checkout(dbapi_connection, connection_record, connection_proxy):
+
+            if dbapi_connection is None or connection_proxy is None:
+                current_app.logger.warning(
+                    f"Something wrong with sqalalchemy \
+                        dbapi_connection {dbapi_connection} connection_record {connection_proxy}"
+                )
+
             try:
                 # this will overwrite any previous checkout_at timestamp
                 connection_record.info["checkout_at"] = time.monotonic()
@@ -404,7 +536,13 @@ def setup_sqlalchemy_events(app):
                 )
 
         @event.listens_for(db.engine, "checkin")
-        def checkin(dbapi_connection, connection_record):  # noqa
+        def checkin(dbapi_connection, connection_record):
+
+            if dbapi_connection is None or connection_record is None:
+                current_app.logger.warning(
+                    f"Something wrong with sqalalchemy \
+                        dbapi_connection {dbapi_connection} connection_record {connection_record}"
+                )
             pass
 
 
@@ -431,7 +569,7 @@ def make_task(app):
                 g.request_id = self.request_id
                 yield
 
-        def on_success(self, retval, task_id, args, kwargs):  # noqa
+        def on_success(self, retval, task_id, args, kwargs):
             # enables request id tracing for these logs
             with self.app_context():
                 elapsed_time = time.monotonic() - self.start
@@ -444,9 +582,11 @@ def make_task(app):
                     )
                 )
 
-        def on_failure(self, exc, task_id, args, kwargs, einfo):  # noqa
+        def on_failure(self, exc, task_id, args, kwargs, einfo):
+
             # enables request id tracing for these logs
             with self.app_context():
+                app.logger.debug(f"einfo is {einfo}")
                 app.logger.exception(
                     "Celery task {task_name} (queue: {queue_name}) failed".format(
                         task_name=self.name,

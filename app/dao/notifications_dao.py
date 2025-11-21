@@ -26,11 +26,14 @@ from werkzeug.datastructures import MultiDict
 from app import create_uuid, db
 from app.dao.dao_utils import autocommit
 from app.dao.inbound_sms_dao import Pagination
-from app.dao.jobs_dao import dao_get_job_by_id
 from app.enums import KeyType, NotificationStatus, NotificationType
-from app.models import FactNotificationStatus, Notification, NotificationHistory
+from app.models import (
+    FactNotificationStatus,
+    Notification,
+    NotificationHistory,
+    Template,
+)
 from app.utils import (
-    emit_job_update_summary,
     escape_special_characters,
     get_midnight_in_utc,
     midnight_n_days_ago,
@@ -112,17 +115,17 @@ def dao_create_notification(notification):
                 except ValueError:
                     orig_time = datetime.strptime(orig_time, "%Y-%m-%d")
                 diff_time = now_time - orig_time
-            current_app.logger.error(
+            current_app.logger.warning(
                 f"dao_create_notification orig created at: {orig_time} and now created at: {now_time}"
             )
             if diff_time.total_seconds() > 300:
-                current_app.logger.error(
+                current_app.logger.warning(
                     "Something is wrong with notification.created_at in email!"
                 )
                 if os.getenv("NOTIFY_ENVIRONMENT") not in ["test"]:
                     notification.created_at = now_time
                     dao_update_notification(notification)
-                    current_app.logger.error(
+                    current_app.logger.warning(
                         f"Email notification created_at reset to   {notification.created_at}"
                     )
 
@@ -305,8 +308,8 @@ def dao_get_notification_count_for_service(*, service_id):
 
 
 def dao_get_notification_count_for_service_message_ratio(service_id, current_year):
-    start_date = datetime(current_year, 1, 1)
-    end_date = datetime(current_year + 1, 1, 1)
+    start_date = datetime(current_year, 6, 16)
+    end_date = datetime(current_year + 1, 6, 16)
     stmt1 = (
         select(func.count())
         .select_from(Notification)
@@ -340,6 +343,86 @@ def dao_get_notification_count_for_service_message_ratio(service_id, current_yea
     recent_count = db.session.execute(stmt1).scalar_one()
     old_count = db.session.execute(stmt2).scalar_one()
     return recent_count + old_count
+
+
+def dao_get_notification_counts_per_service(service_ids, current_year):
+    """
+    Get notification counts for multiple services in a single organization.
+    """
+    if not service_ids:
+        return {}
+
+    start_date = datetime(current_year, 6, 16)
+    end_date = datetime(current_year + 1, 6, 16)
+
+    stmt1 = (
+        select(Notification.service_id, func.count().label("count"))
+        .where(
+            Notification.service_id.in_(service_ids),
+            Notification.status
+            not in [
+                NotificationStatus.CANCELLED,
+                NotificationStatus.CREATED,
+                NotificationStatus.SENDING,
+            ],
+            Notification.created_at >= start_date,
+            Notification.created_at < end_date,
+        )
+        .group_by(Notification.service_id)
+    )
+
+    stmt2 = (
+        select(NotificationHistory.service_id, func.count().label("count"))
+        .where(
+            NotificationHistory.service_id.in_(service_ids),
+            NotificationHistory.status
+            not in [
+                NotificationStatus.CANCELLED,
+                NotificationStatus.CREATED,
+                NotificationStatus.SENDING,
+            ],
+            NotificationHistory.created_at >= start_date,
+            NotificationHistory.created_at < end_date,
+        )
+        .group_by(NotificationHistory.service_id)
+    )
+
+    result_dict = {}
+
+    recent_results = db.session.execute(stmt1).all()
+    for service_id, count in recent_results:
+        result_dict[service_id] = count
+
+    history_results = db.session.execute(stmt2).all()
+    for service_id, count in history_results:
+        result_dict[service_id] = result_dict.get(service_id, 0) + count
+
+    return result_dict
+
+
+def dao_get_recent_sms_template_per_service(service_ids):
+
+    if not service_ids:
+        return {}
+
+    stmt = (
+        select(
+            Notification.service_id,
+            Template.name.label("template_name"),
+        )
+        .join(Template, Template.id == Notification.template_id)
+        .where(
+            Notification.service_id.in_(service_ids),
+            Notification.notification_type == NotificationType.SMS,
+            Notification.key_type != KeyType.TEST,
+        )
+        .distinct(Notification.service_id)
+        .order_by(Notification.service_id, desc(Notification.created_at))
+    )
+
+    results = db.session.execute(stmt).all()
+
+    return {service_id: template_name for service_id, template_name in results}
 
 
 def dao_get_failed_notification_count():
@@ -897,19 +980,6 @@ def dao_update_delivery_receipts(receipts, delivered):
         f"#loadtestperformance batch update query time: \
         updated {len(receipts)} notification in {elapsed_time} ms"
     )
-    job_ids = (
-        db.session.execute(
-            select(Notification.job_id).where(
-                Notification.message_id.in_(id_to_carrier.keys())
-            )
-        )
-        .scalars()
-        .all()
-    )
-
-    for job_id in set(job_ids):
-        job = dao_get_job_by_id(job_id)
-        emit_job_update_summary(job)
 
 
 def dao_close_out_delivery_receipts():

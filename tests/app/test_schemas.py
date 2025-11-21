@@ -1,4 +1,5 @@
 import datetime
+from unittest.mock import MagicMock, patch
 
 import pytest
 from marshmallow import ValidationError
@@ -9,8 +10,9 @@ from app.dao.provider_details_dao import (
     dao_update_provider_details,
     get_provider_details_by_identifier,
 )
-from app.models import ProviderDetailsHistory
+from app.models import ProviderDetailsHistory, ServicePermission
 from app.schema_validation import validate_schema_date_with_hour
+from app.schemas import ServiceSchema, UserSchema
 from tests.app.db import create_api_key
 
 
@@ -48,7 +50,7 @@ def test_notification_schema_adds_api_key_name(sample_notification):
         "notification_with_template_schema",
         "notification_schema",
         "notification_with_template_schema",
-        "notification_with_personalisation_schema",
+        "public_notification_response_schema",
     ],
 )
 def test_notification_schema_has_correct_status(sample_notification, schema_name):
@@ -67,7 +69,9 @@ def test_notification_schema_has_correct_status(sample_notification, schema_name
         ("mobile_number", "+14254147755"),
     ],
 )
-def test_user_update_schema_accepts_valid_attribute_pairs(user_attribute, user_value):
+def test_user_update_schema_accepts_valid_attribute_pairs(
+    notify_api, user_attribute, user_value
+):
     update_dict = {user_attribute: user_value}
     from app.schemas import user_update_schema_load_json
 
@@ -84,7 +88,9 @@ def test_user_update_schema_accepts_valid_attribute_pairs(user_attribute, user_v
         ("mobile_number", "+44077009"),
     ],
 )
-def test_user_update_schema_rejects_invalid_attribute_pairs(user_attribute, user_value):
+def test_user_update_schema_rejects_invalid_attribute_pairs(
+    notify_api, user_attribute, user_value
+):
     from app.schemas import user_update_schema_load_json
 
     update_dict = {user_attribute: user_value}
@@ -109,7 +115,9 @@ def test_user_update_schema_rejects_invalid_attribute_pairs(user_attribute, user
         "platform_admin",
     ],
 )
-def test_user_update_schema_rejects_disallowed_attribute_keys(user_attribute):
+def test_user_update_schema_rejects_disallowed_attribute_keys(
+    notify_api, user_attribute
+):
     update_dict = {user_attribute: "not important"}
     from app.schemas import user_update_schema_load_json
 
@@ -191,3 +199,53 @@ def test_date_more_than_24_hours_in_future(mocker):
         assert 1 == 0
     except Exception as e:
         assert "datetime can only be 24 hours in the future" in str(e)
+
+
+def test_user_permissions_returns_correct_dict(sample_user):
+    sample_user.id = 1
+    mock_permissions = [
+        MagicMock(service_id=111, permission="read"),
+        MagicMock(service_id=111, permission="write"),
+        MagicMock(service_id=222, permission="admin"),
+    ]
+    with patch(
+        "app.schemas.permission_dao.get_permissions_by_user_id",
+        return_value=mock_permissions,
+    ):
+        schema = UserSchema()
+
+        result = schema.user_permissions(sample_user)
+
+    expected = {
+        "111": ["read", "write"],
+        "222": ["admin"],
+    }
+
+    assert result == expected
+
+
+def test_deserialize_with_permissions():
+    input_data = {"id": "service-123", "permissions": ["read", "write"]}
+
+    schema = ServiceSchema()
+    result = schema.deserialize_service_permissions(input_data)
+
+    assert isinstance(result["permissions"], list)
+    assert all(isinstance(p, ServicePermission) for p in result["permissions"])
+    assert result["permissions"][0].service_id == "service-123"
+    assert result["permissions"][0].permission == "read"
+    assert result["permissions"][1].permission == "write"
+
+
+def test_deserialize_with_no_permissions_key():
+    input_data = {"id": "service-123", "other_data": "value"}
+    schema = ServiceSchema()
+    result = schema.deserialize_service_permissions(input_data.copy())
+    assert result == input_data
+
+
+def test_deserialize_with_non_dict_input():
+    input_data = ["not", "a", "dict"]
+    schema = ServiceSchema()
+    result = schema.deserialize_service_permissions(input_data)
+    assert result == input_data

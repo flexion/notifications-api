@@ -11,7 +11,6 @@ import flask
 from click_datetime import Datetime as click_dt
 from faker import Faker
 from flask import current_app, json
-from notifications_python_client.authentication import create_jwt_token
 from sqlalchemy import and_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.exc import NoResultFound
@@ -19,7 +18,10 @@ from sqlalchemy.orm.exc import NoResultFound
 from app import db, redis_store
 from app.aws import s3
 from app.celery.nightly_tasks import cleanup_unfinished_jobs
-from app.celery.tasks import process_row
+from app.celery.tasks import (
+    generate_notification_reports_task,
+    process_row,
+)
 from app.dao.annual_billing_dao import (
     dao_create_or_update_annual_billing_for_year,
     set_default_free_allowance_for_service,
@@ -58,6 +60,7 @@ from app.models import (
     User,
 )
 from app.utils import utc_now
+from notifications_python_client.authentication import create_jwt_token
 from notifications_utils.recipients import RecipientCSV
 from notifications_utils.template import SMSMessageTemplate
 from tests.app.db import (
@@ -180,7 +183,7 @@ def insert_inbound_numbers_from_file(file_name):
         for line in file:
             line = line.strip()
             if line:
-                current_app.logger.info(line)
+                current_app.logger.debug(line)
                 db.session.execute(sql, {"uuid": str(uuid.uuid4()), "line": line})
                 db.session.commit()
 
@@ -225,7 +228,6 @@ def bulk_invite_user_to_service(file_name, service_id, user_id, auth_type, permi
     # "send_texts,send_emails,view_activity"
     from app.service_invite.rest import create_invited_user
 
-    current_app.logger.info("ENTER")
     file = open(file_name)
     for email_address in file:
         data = {
@@ -236,7 +238,6 @@ def bulk_invite_user_to_service(file_name, service_id, user_id, auth_type, permi
             "auth_type": auth_type,
             "invite_link_host": current_app.config["ADMIN_BASE_URL"],
         }
-        current_app.logger.info(f"DATA = {data}")
         with current_app.test_request_context(
             path=f"/service/{service_id}/invite/",
             method="POST",
@@ -245,12 +246,12 @@ def bulk_invite_user_to_service(file_name, service_id, user_id, auth_type, permi
         ):
             try:
                 response = create_invited_user(service_id)
-                current_app.logger.info(f"RESPONSE {response[1]}")
+                current_app.logger.debug(f"RESPONSE {response[1]}")
                 if response[1] != 201:
                     current_app.logger.warning(
                         f"*** ERROR occurred for email address: {email_address.strip()}"
                     )
-                current_app.logger.info(response[0].get_data(as_text=True))
+                current_app.logger.debug(response[0].get_data(as_text=True))
             except Exception:
                 current_app.logger.exception(
                     f"*** ERROR occurred for email address: {email_address.strip()}.",
@@ -334,7 +335,6 @@ def populate_organizations_from_file(file_name):
 
         for line in itertools.islice(f, 1, None):
             columns = line.split("|")
-            current_app.logger.info(columns)
             email_branding = None
             email_branding_column = columns[5].strip()
             if len(email_branding_column) > 0:
@@ -436,20 +436,19 @@ def populate_go_live(file_name):
     # 6- Contact detail, 7-MOU, 8- LIVE date, 9- SMS, 10 - Email, 11 - Letters, 12 -CRM, 13 - Blue badge
     import csv
 
-    current_app.logger.info("Populate go live user and date")
     with open(file_name, "r") as f:
         rows = csv.reader(
             f,
             quoting=csv.QUOTE_MINIMAL,
             skipinitialspace=True,
         )
-        current_app.logger.info(next(rows))  # ignore header row
+        current_app.logger.debug(next(rows))  # ignore header row
         for index, row in enumerate(rows):
-            current_app.logger.info(index, row)
+            current_app.logger.debug(index, row)
             service_id = row[2]
             go_live_email = row[6]
             go_live_date = datetime.strptime(row[8], "%d/%m/%Y") + timedelta(hours=12)
-            current_app.logger.info(service_id, go_live_email, go_live_date)
+            current_app.logger.debug(service_id, go_live_email, go_live_date)
             try:
                 if go_live_email:
                     go_live_user = get_user_by_email(go_live_email)
@@ -503,13 +502,11 @@ def fix_billable_units():
         )
         db.session.execute(stmt)
     db.session.commit()
-    current_app.logger.info("End fix_billable_units")
 
 
 @notify_command(name="delete-unfinished-jobs")
 def delete_unfinished_jobs():
     cleanup_unfinished_jobs()
-    current_app.logger.info("End cleanup_unfinished_jobs")
 
 
 @notify_command(name="process-row-from-job")
@@ -613,7 +610,7 @@ def dump_user_info(user_email_address):
     with open("user_download.json", "wb") as f:
         f.write(json.dumps(content).encode("utf8"))
     f.close()
-    current_app.logger.info("Successfully downloaded user info to user_download.json")
+    current_app.logger.debug("Successfully downloaded user info to user_download.json")
 
 
 @notify_command(name="populate-annual-billing-with-defaults")
@@ -750,12 +747,13 @@ def create_admin_jwt():
 @notify_command(name="create-user-jwt")
 @click.option("-t", "--token", required=True, prompt=False)
 def create_user_jwt(token):
-    if getenv("NOTIFY_ENVIRONMENT", "") != "development":
+    if getenv("NOTIFY_ENVIRONMENT", "") not in ["development", "test"]:
         current_app.logger.error("Can only be run in development")
         return
     service_id = token[-73:-37]
     api_key = token[-36:]
-    current_app.logger.info(create_jwt_token(api_key, service_id))
+    token = create_jwt_token(api_key, service_id)
+    current_app.logger.info(token)
 
 
 def _update_template(id, name, template_type, content, subject):
@@ -805,6 +803,11 @@ def update_templates():
         for d in data:
             _update_template(d["id"], d["name"], d["type"], d["content"], d["subject"])
     _clear_templates_from_cache()
+
+
+@notify_command(name="generate-notification-reports")
+def generate_notification_reports():
+    generate_notification_reports_task()
 
 
 def _clear_templates_from_cache():

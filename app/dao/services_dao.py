@@ -22,6 +22,7 @@ from app.enums import (
     NotificationStatus,
     NotificationType,
     ServicePermissionType,
+    UserState,
 )
 from app.models import (
     AnnualBilling,
@@ -251,6 +252,21 @@ def dao_fetch_all_services_created_by_user(user_id):
     )
 
     return db.session.execute(stmt).scalars().all()
+
+
+def dao_get_service_primary_contacts(service_ids):
+
+    if not service_ids:
+        return {}
+
+    stmt = select(
+        Service.id.label("service_id"),
+        Service.billing_contact_email_addresses.label("email_address"),
+    ).where(Service.id.in_(service_ids))
+
+    results = db.session.execute(stmt).all()
+
+    return {service_id: email_address for service_id, email_address in results}
 
 
 @autocommit
@@ -738,7 +754,9 @@ def dao_resume_service(service_id):
 
 def dao_fetch_active_users_for_service(service_id):
 
-    stmt = select(User).where(User.services.any(id=service_id), User.state == "active")
+    stmt = select(User).where(
+        User.services.any(id=service_id), User.state == UserState.ACTIVE
+    )
     result = db.session.execute(stmt)
     return result.scalars().all()
 

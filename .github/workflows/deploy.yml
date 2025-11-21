@@ -36,6 +36,7 @@ jobs:
         AWS_ACCESS_KEY_ID: ${{ secrets.TERRAFORM_STATE_ACCESS_KEY }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.TERRAFORM_STATE_SECRET_ACCESS_KEY }}
       run: terraform init
+
     - name: Terraform apply
       working-directory: terraform/staging
       env:
@@ -50,7 +51,7 @@ jobs:
       run: make bootstrap
 
     - name: Create requirements.txt
-      run: poetry export --without-hashes --format=requirements.txt > requirements.txt
+      run: poetry export --output requirements.txt
 
     - name: Deploy to cloud.gov
       uses: cloud-gov/cg-cli-tools@main

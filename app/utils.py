@@ -1,7 +1,8 @@
 import os
+import re
 from datetime import datetime, timedelta, timezone
 
-from flask import current_app, url_for
+from flask import abort, current_app, url_for
 from sqlalchemy import func
 
 from notifications_utils.template import HTMLEmailTemplate, SMSMessageTemplate
@@ -42,13 +43,25 @@ def url_with_token(data, url, config, base_url=None):
     return base_url + token
 
 
-def get_template_instance(template, values):
+def get_template_instance(template, values=None):
     from app.enums import TemplateType
 
     return {
         TemplateType.SMS: SMSMessageTemplate,
         TemplateType.EMAIL: HTMLEmailTemplate,
     }[template["template_type"]](template, values)
+
+
+def template_model_to_dict(template):
+    return {
+        "id": str(template.id),
+        "template_type": template.template_type,
+        "content": template.content,
+        "subject": getattr(template, "subject", None),
+        "created_at": template.created_at,
+        "name": template.name,
+        "version": template.version,
+    }
 
 
 def get_midnight_in_utc(date):
@@ -133,16 +146,50 @@ def debug_not_production(msg):
         current_app.logger.info(msg)
 
 
-def emit_job_update_summary(job):
-    from app import socketio
+def is_suspicious_input(input_str):
+    if not isinstance(input_str, str):
+        return False
 
-    current_app.logger.info(f"Emitting summary for job {job.id}")
-    socketio.emit(
-        "job_updated",
-        {
-            "job_id": str(job.id),
-            "job_status": job.job_status,
-            "notification_count": job.notification_count,
-        },
-        room=f"job-{job.id}",
+    pattern = re.compile(
+        r"""
+                         (?i) # case insensite
+                         \b  # word boundary
+                         ( # start of group for SQL keywords
+                         OR   # match SQL keyword OR
+                         |AND
+                         |UNION
+                         |SELECT
+                         |DROP
+                         |INSERT
+                         |UPDATE
+                         |DELETE
+                         |EXEC
+                         |TRUNCATE
+                         |CREATE
+                         |ALTER
+                         |-- # match SQL single-line comment
+                         |/\* # match SQL multi-line comment
+                         |\bpg_sleep\b # Match PostgreSQL 'pg_sleep' function
+
+                         |\bsleep\b # Match SQL Server 'sleep' function
+                         ) # End SQL keywords and function group
+                         | # OR operator to include an alternate pattern
+                         [';]{2,} # Match two or more consecutive single quotes or semi-colons
+                         """,
+        re.VERBOSE,
     )
+    return bool(re.search(pattern, input_str))
+
+
+def is_valid_id(id):
+    if not isinstance(id, str):
+        return True
+    return bool(re.match(r"^[a-zA-Z0-9_-]{1,50}$", id))
+
+
+def check_suspicious_id(*args):
+    for id in args:
+        if not is_valid_id(id):
+            abort(403)
+        if is_suspicious_input(id):
+            abort(403)

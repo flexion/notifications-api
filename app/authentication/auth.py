@@ -2,6 +2,9 @@ import os
 import uuid
 
 from flask import current_app, g, request
+from sqlalchemy.orm.exc import NoResultFound
+
+from app.serialised_models import SerialisedService
 from notifications_python_client.authentication import (
     decode_jwt_token,
     get_token_issuer,
@@ -13,9 +16,6 @@ from notifications_python_client.errors import (
     TokenExpiredError,
     TokenIssuerError,
 )
-from sqlalchemy.orm.exc import NoResultFound
-
-from app.serialised_models import SerialisedService
 from notifications_utils import request_helper
 
 # stvnrlly - this is silly, but bandit has a multiline string bug (https://github.com/PyCQA/bandit/issues/658)
@@ -29,6 +29,7 @@ GENERAL_TOKEN_ERROR_MESSAGE = TOKEN_MESSAGE_ONE + TOKEN_MESSAGE_TWO
 
 class AuthError(Exception):
     def __init__(self, message, code, service_id=None, api_key_id=None):
+        super().__init__(message, code, service_id, api_key_id)
         self.message = {"token": [message]}
         self.short_message = message
         self.code = code

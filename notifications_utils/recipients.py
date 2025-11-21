@@ -111,6 +111,9 @@ class RecipientCSV:
         try:
             self._placeholders = list(value) + self.recipient_column_headers
         except TypeError:
+            current_app.logger.exception(
+                f"TypeError setting the placeholders to {value}"
+            )
             self._placeholders = self.recipient_column_headers
         self.placeholders_as_column_keys = [
             InsensitiveDict.make_key(placeholder) for placeholder in self._placeholders
@@ -350,6 +353,7 @@ class RecipientCSV:
                         value, international=self.allow_international_sms
                     )
             except (InvalidEmailError, InvalidPhoneError) as error:
+                current_app.logger.exception(f"Email or phone error for {value}")
                 return str(error)
 
         if InsensitiveDict.make_key(key) not in self.placeholders_as_column_keys:
@@ -689,6 +693,7 @@ def validate_email_address(email_address):  # noqa (C901 too complex)
     try:
         hostname = hostname.encode("idna").decode("ascii")
     except UnicodeError:
+        current_app.logger.exception("UnicodeError validating email address")
         raise InvalidEmailError
 
     parts = hostname.split(".")
@@ -731,6 +736,9 @@ def format_phone_number_human_readable(phone_number):
         phone_number = validate_phone_number(phone_number, international=True)
     except InvalidPhoneError:
         # if there was a validation error, we want to shortcut out here, but still display the number on the front end
+        current_app.logger.exception(
+            "InvalidPhoneError trying to format_phone_number_human_readable()"
+        )
         return phone_number
     international_phone_info = get_international_phone_info(phone_number)
 

@@ -11,7 +11,7 @@ from app import db
 from app.dao.dao_utils import autocommit
 from app.dao.permissions_dao import permission_dao
 from app.dao.service_user_dao import dao_get_service_users_by_user_id
-from app.enums import AuthType, PermissionType
+from app.enums import AuthType, PermissionType, UserState
 from app.errors import InvalidRequest
 from app.models import Organization, Service, User, VerifyCode
 from app.utils import escape_special_characters, get_archived_db_column_value, utc_now
@@ -53,7 +53,9 @@ def get_login_gov_user(login_uuid, email_address):
                 db.session.rollback()
 
         return user
-    # Remove this 1 July 2025, all users should have login.gov uuids by now
+
+    # Handle the case of the brand new user.  We know their email from the
+    # invitation but need to related the login_uuid to it.
     stmt = select(User).where(User.email_address.ilike(email_address))
     user = db.session.execute(stmt).scalars().first()
 
@@ -231,7 +233,7 @@ def dao_archive_user(user):
     user.password = str(uuid.uuid4())
     # Changing the current_session_id signs the user out
     user.current_session_id = "00000000-0000-0000-0000-000000000000"
-    user.state = "inactive"
+    user.state = UserState.INACTIVE
 
     db.session.add(user)
 
@@ -241,7 +243,7 @@ def user_can_be_archived(user):
 
     for service in active_services:
         other_active_users = [
-            x for x in service.users if x.state == "active" and x != user
+            x for x in service.users if x.state == UserState.ACTIVE and x != user
         ]
 
         if not other_active_users:

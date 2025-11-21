@@ -5,7 +5,7 @@ from flask import current_app
 from sqlalchemy import between, select, union
 from sqlalchemy.exc import SQLAlchemyError
 
-from app import db, notify_celery, redis_store, zendesk_client
+from app import db, get_zendesk_client, notify_celery, redis_store
 from app.celery.tasks import (
     get_recipient_csv_and_template_and_sender_id,
     process_incomplete_jobs,
@@ -43,6 +43,8 @@ from notifications_utils import aware_utcnow
 from notifications_utils.clients.zendesk.zendesk_client import NotifySupportTicket
 
 MAX_NOTIFICATION_FAILS = 10000
+
+zendesk_client = get_zendesk_client()
 
 
 @notify_celery.task(name="run-scheduled-jobs")
@@ -282,6 +284,9 @@ def process_delivery_receipts(self):
     except Exception as ex:
         retry_count = self.request.retries
         wait_time = 3600 * 2**retry_count
+
+        current_app.logger.exception(str(ex))
+
         try:
             raise self.retry(ex=ex, countdown=wait_time)
         except self.MaxRetriesExceededError:
@@ -301,14 +306,6 @@ def cleanup_delivery_receipts(self):
 def batch_insert_notifications(self):
     batch = []
 
-    # TODO We probably need some way to clear the list if
-    # things go haywire.  A command?
-
-    # with redis_store.pipeline():
-    #     while redis_store.llen("message_queue") > 0:
-    #         redis_store.lpop("message_queue")
-    #     current_app.logger.info("EMPTY!")
-    #     return
     current_len = redis_store.llen("message_queue")
     with redis_store.pipeline():
         # since this list is being fed by other processes, just grab what is available when

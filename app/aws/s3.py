@@ -4,14 +4,19 @@ from os import getenv
 import os
 import re
 import time
+import urllib
 from io import StringIO
 
 import botocore
-import eventlet
+import gevent
 from boto3 import Session
 from flask import current_app
 
+from app import job_cache, job_cache_lock
 from app.clients import AWS_CLIENT_CONFIG
+
+# from app.service.rest import get_service_by_id
+from app.utils import hilite
 from notifications_utils import aware_utcnow
 
 FILE_LOCATION_STRUCTURE = "service-{}-notify/{}.csv"
@@ -19,11 +24,6 @@ NEW_FILE_LOCATION_STRUCTURE = "{}-service-notify/{}.csv"
 
 # Temporarily extend cache to 7 days
 ttl = 60 * 60 * 24 * 7
-
-
-# Global variable
-s3_client = None
-s3_resource = None
 
 
 def get_service_id_from_key(key):
@@ -34,62 +34,64 @@ def get_service_id_from_key(key):
 
 
 def set_job_cache(key, value):
-    current_app.logger.debug(f"Setting {key} in the job_cache to {value}.")
-    job_cache = current_app.config["job_cache"]
-    job_cache[key] = (value, time.time() + 8 * 24 * 60 * 60)
+    # current_app.logger.debug(f"Setting {key} in the job_cache to {value}.")
+
+    with job_cache_lock:
+        job_cache[key] = (value, time.time() + 8 * 24 * 60 * 60)
 
 
 def get_job_cache(key):
-    job_cache = current_app.config["job_cache"]
+    key = str(key)
     ret = job_cache.get(key)
-    if ret is None:
-        current_app.logger.warning(f"Could not find {key} in the job_cache.")
-    else:
-        current_app.logger.debug(f"Got {key} from job_cache with value {ret}.")
     return ret
 
 
 def len_job_cache():
-    job_cache = current_app.config["job_cache"]
     ret = len(job_cache)
     current_app.logger.debug(f"Length of job_cache is {ret}")
     return ret
 
 
 def clean_cache():
-    job_cache = current_app.config["job_cache"]
     current_time = time.time()
     keys_to_delete = []
-    for key, (_, expiry_time) in job_cache.items():
-        if expiry_time < current_time:
-            keys_to_delete.append(key)
 
-    current_app.logger.debug(
-        f"Deleting the following keys from the job_cache: {keys_to_delete}"
-    )
-    for key in keys_to_delete:
-        del job_cache[key]
+    with job_cache_lock:
+        for key, (_, expiry_time) in job_cache.items():
+            if expiry_time < current_time:
+                keys_to_delete.append(key)
+
+        current_app.logger.debug(
+            f"Deleting the following keys from the job_cache: {keys_to_delete}"
+        )
+        for key in keys_to_delete:
+            del job_cache[key]
 
 
 def get_s3_client():
-    global s3_client
-    if s3_client is None:
-        region = current_app.config["CSV_UPLOAD_BUCKET"]["region"]
-        session = Session(
-            region_name=region,
-        )
-        s3_client = session.client("s3", config=AWS_CLIENT_CONFIG)
+
+    access_key = current_app.config["CSV_UPLOAD_BUCKET"]["access_key_id"]
+    secret_key = current_app.config["CSV_UPLOAD_BUCKET"]["secret_access_key"]
+    region = current_app.config["CSV_UPLOAD_BUCKET"]["region"]
+    session = Session(
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        region_name=region,
+    )
+    s3_client = session.client("s3", config=AWS_CLIENT_CONFIG)
     return s3_client
 
 
 def get_s3_resource():
-    global s3_resource
-    if s3_resource is None:
-        region = current_app.config["CSV_UPLOAD_BUCKET"]["region"]
-        session = Session(
-            region_name=region,
-        )
-        s3_resource = session.resource("s3", config=AWS_CLIENT_CONFIG)
+    access_key = current_app.config["CSV_UPLOAD_BUCKET"]["access_key_id"]
+    secret_key = current_app.config["CSV_UPLOAD_BUCKET"]["secret_access_key"]
+    region = current_app.config["CSV_UPLOAD_BUCKET"]["region"]
+    session = Session(
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        region_name=region,
+    )
+    s3_resource = session.resource("s3", config=AWS_CLIENT_CONFIG)
     return s3_resource
 
 
@@ -125,8 +127,46 @@ def list_s3_objects():
         )
 
 
+def get_notification_reports(service_id):
+
+    bucket_name = _get_bucket_name()
+    s3_client = get_s3_client()
+    # Our reports only support 7 days, but pull 8 days to avoid
+    # any edge cases
+    time_limit = aware_utcnow() - datetime.timedelta(days=8)
+    reports = []
+    try:
+        response = s3_client.list_objects_v2(Bucket=bucket_name)
+        while True:
+            for obj in response.get("Contents", []):
+                if obj["LastModified"] >= time_limit:
+                    if service_id in obj["Key"] and "report" in obj["Key"]:
+                        reports.append(obj)
+            if "NextContinuationToken" in response:
+                response = s3_client.list_objects_v2(
+                    Bucket=bucket_name,
+                    ContinuationToken=response["NextContinuationToken"],
+                )
+            else:
+                break
+    except Exception as e:
+        current_app.logger.exception(
+            f"An error occurred while regenerating cache #notify-debug-admin-1200: {str(e)}",
+        )
+    return reports
+
+
 def get_bucket_name():
     return current_app.config["CSV_UPLOAD_BUCKET"]["bucket"]
+
+
+def delete_s3_object(key):
+
+    try:
+        remove_csv_object(key)
+        current_app.logger.debug(f"#delete-s3-object Deleted: {key}")
+    except botocore.exceptions.ClientError:
+        current_app.logger.exception(f"Couldn't delete {key}")
 
 
 def cleanup_old_s3_objects():
@@ -160,6 +200,34 @@ def cleanup_old_s3_objects():
     except Exception:
         current_app.logger.exception(
             "#delete-old-s3-objects An error occurred while cleaning up old s3 objects",
+        )
+    try:
+        response = s3_client.list_objects_v2(Bucket=bucket_name)
+
+        service_ids = set()
+        while True:
+            for obj in response.get("Contents", []):
+                # Get the service id out of the upload key
+                key = obj["Key"]
+                object_arr = key.split("/")
+                service_id = object_arr[0]
+                service_id = service_id.replace("-service-notify", "")
+                service_ids.add(service_id)
+            if "NextContinuationToken" in response:
+                response = s3_client.list_objects_v2(
+                    Bucket=bucket_name,
+                    ContinuationToken=response["NextContinuationToken"],
+                )
+            else:
+                break
+            retained_services = []
+            for service_id in service_ids:
+                retained_services.append(service_id)
+
+        return service_ids
+    except Exception as error:
+        current_app.logger.exception(
+            f"#delete-old-s3-objects An error occurred while cleaning up old s3 objects: {str(error)}"
         )
 
 
@@ -202,10 +270,11 @@ def read_s3_file(bucket_name, object_key, s3res):
                 f"{job_id}_personalisation",
                 extract_personalisation(job),
             )
-
-    except LookupError:
-        # perhaps our key is not formatted as we expected.  If so skip it.
-        current_app.logger.exception("LookupError #notify-debug-admin-1200")
+    except botocore.exceptions.ClientError as e:
+        if e.response["Error"]["Code"] == "NoSuchKey":
+            current_app.logger.error(f"NoSuchKey: {object_key}")
+        else:
+            raise
 
 
 def get_s3_files():
@@ -222,17 +291,18 @@ def get_s3_files():
     )
     count = 0
     try:
-        for object_key in object_keys:
-            read_s3_file(bucket_name, object_key, s3res)
-            count = count + 1
-            eventlet.sleep(0.2)
+        greenlets = [
+            gevent.spawn(read_s3_file, bucket_name, object_key, s3res)
+            for object_key in object_keys
+        ]
+        gevent.joinall(greenlets)
     except Exception:
         current_app.logger.exception(
-            f"Trouble reading {object_key} which is # {count} during cache regeneration"
+            f"Trouble reading object_key which is # {count} during cache regeneration"
         )
     except OSError as e:
         current_app.logger.exception(
-            f"Egress proxy issue reading {object_key} which is # {count}"
+            f"Egress proxy issue reading object_key which is # {count}"
         )
         raise e
 
@@ -302,9 +372,7 @@ def file_exists(file_location):
 
 
 def get_job_location(service_id, job_id):
-    current_app.logger.debug(
-        f"#notify-debug-s3-partitioning NEW JOB_LOCATION: {NEW_FILE_LOCATION_STRUCTURE.format(service_id, job_id)}"
-    )
+
     return (
         current_app.config["CSV_UPLOAD_BUCKET"]["bucket"],
         NEW_FILE_LOCATION_STRUCTURE.format(service_id, job_id),
@@ -318,9 +386,7 @@ def get_old_job_location(service_id, job_id):
     but it will take a few days where we have to support both formats.
     Remove this when everything works with the NEW_FILE_LOCATION_STRUCTURE.
     """
-    current_app.logger.debug(
-        f"#notify-debug-s3-partitioning OLD JOB LOCATION: {FILE_LOCATION_STRUCTURE.format(service_id, job_id)}"
-    )
+
     return (
         current_app.config["CSV_UPLOAD_BUCKET"]["bucket"],
         FILE_LOCATION_STRUCTURE.format(service_id, job_id),
@@ -344,6 +410,10 @@ def get_job_from_s3(service_id, job_id):
     that indicates things are permanently broken, we want to give up right away
     to save time.
     """
+
+    job = get_job_cache(job_id)
+    if job:
+        return job
     # We have to make sure the retries don't take up to much time, because
     # we might be retrieving dozens of jobs.  So max time is:
     # 0.2 + 0.4 + 0.8 + 1.6 = 3.0 seconds
@@ -384,7 +454,7 @@ def get_job_from_s3(service_id, job_id):
                 )
                 retries += 1
                 sleep_time = backoff_factor * (2**retries)  # Exponential backoff
-                eventlet.sleep(sleep_time)
+                gevent.sleep(sleep_time)
                 continue
             else:
                 # Typically this is "NoSuchKey"
@@ -408,7 +478,13 @@ def get_job_from_s3(service_id, job_id):
 def extract_phones(job, service_id, job_id):
     job_csv_data = StringIO(job)
     csv_reader = csv.reader(job_csv_data)
-    first_row = next(csv_reader)
+    try:
+        first_row = next(csv_reader)
+    except StopIteration:
+        current_app.logger.warning(
+            f"Empty CSV file for job {job_id} in service {service_id}"
+        )
+        return {}
 
     phone_index = 0
     for i, item in enumerate(first_row):
@@ -438,9 +514,22 @@ def extract_phones(job, service_id, job_id):
 
 
 def extract_personalisation(job):
+    if job is None:
+        current_app.logger.warning(
+            "No job data provided for personalisation extraction"
+        )
+        return {}
     if isinstance(job, dict):
         job = job[0]
+    if not job:
+        current_app.logger.warning("Empty job data for personalisation extraction")
+        return {}
     job = job.split("\r\n")
+    if not job or not job[0]:
+        current_app.logger.warning(
+            "Empty job data after split for personalisation extraction"
+        )
+        return {}
     first_row = job[0]
     job.pop(0)
     first_row = first_row.split(",")
@@ -455,9 +544,9 @@ def extract_personalisation(job):
 
 
 def get_phone_number_from_s3(service_id, job_id, job_row_number):
+
     job = get_job_cache(job_id)
     if job is None:
-        current_app.logger.debug(f"job {job_id} was not in the cache")
         job = get_job_from_s3(service_id, job_id)
         # Even if it is None, put it here to avoid KeyErrors
         set_job_cache(job_id, job)
@@ -471,8 +560,14 @@ def get_phone_number_from_s3(service_id, job_id, job_row_number):
         )
         return "Unavailable"
 
-    phones = extract_phones(job, service_id, job_id)
-    set_job_cache(f"{job_id}_phones", phones)
+    phones = get_job_cache(f"{job_id}_phones")
+    if phones is None:
+        phones = extract_phones(job, service_id, job_id)
+        set_job_cache(f"{job_id}_phones", phones)
+    else:
+        phones = phones[
+            0
+        ]  # we only want the phone numbers not the cache expiration time
 
     # If we can find the quick dictionary, use it
     phone_to_return = phones[job_row_number]
@@ -490,8 +585,8 @@ def get_personalisation_from_s3(service_id, job_id, job_row_number):
     # At the same time we don't want to store it in redis or the db
     # So this is a little recycling mechanism to reduce the number of downloads.
     job = get_job_cache(job_id)
+
     if job is None:
-        current_app.logger.debug(f"job {job_id} was not in the cache")
         job = get_job_from_s3(service_id, job_id)
         # Even if it is None, put it here to avoid KeyErrors
         set_job_cache(job_id, job)
@@ -509,15 +604,15 @@ def get_personalisation_from_s3(service_id, job_id, job_row_number):
         )
         return {}
 
-    set_job_cache(f"{job_id}_personalisation", extract_personalisation(job))
+    personalisation = get_job_cache(f"{job_id}_personalisation")
+    if personalisation is None:
+        set_job_cache(f"{job_id}_personalisation", extract_personalisation(job))
 
     return get_job_cache(f"{job_id}_personalisation")[0].get(job_row_number)
 
 
 def get_job_metadata_from_s3(service_id, job_id):
-    current_app.logger.debug(
-        f"#notify-debug-s3-partitioning CALLING GET_JOB_METADATA with {service_id}, {job_id}"
-    )
+
     obj = get_s3_object(*get_job_location(service_id, job_id))
     return obj.get()["Metadata"]
 
@@ -538,3 +633,44 @@ def remove_csv_object(object_key):
         current_app.config["CSV_UPLOAD_BUCKET"]["region"],
     )
     return obj.delete()
+
+
+def s3upload(
+    filedata,
+    region,
+    bucket_name,
+    file_location,
+    content_type="binary/octet-stream",
+    tags=None,
+    metadata=None,
+):
+    _s3 = get_s3_resource()
+
+    key = _s3.Object(bucket_name, file_location)
+
+    put_args = {
+        "Body": filedata,
+        "ServerSideEncryption": "AES256",
+        "ContentType": content_type,
+    }
+
+    if tags:
+        tags = urllib.parse.urlencode(tags)
+        put_args["Tagging"] = tags
+
+    if metadata:
+        metadata = put_args["Metadata"] = metadata
+
+    try:
+        current_app.logger.debug(hilite(f"Going to try to upload this {key}"))
+        key.put(**put_args)
+    except botocore.exceptions.NoCredentialsError as e:
+        current_app.logger.exception(
+            f"Unable to upload {key} to S3 bucket because of {e}"
+        )
+        raise e
+    except botocore.exceptions.ClientError as e:
+        current_app.logger.exception(
+            f"Unable to upload {key}to S3 bucket because of {e}"
+        )
+        raise e

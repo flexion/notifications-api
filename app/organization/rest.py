@@ -1,4 +1,6 @@
 import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from flask import Blueprint, abort, current_app, jsonify, request
 from sqlalchemy.exc import IntegrityError
@@ -8,6 +10,10 @@ from app.config import QueueNames
 from app.dao.annual_billing_dao import set_default_free_allowance_for_service
 from app.dao.dao_utils import transaction
 from app.dao.fact_billing_dao import fetch_usage_year_for_organization
+from app.dao.notifications_dao import (
+    dao_get_notification_counts_per_service,
+    dao_get_recent_sms_template_per_service,
+)
 from app.dao.organization_dao import (
     dao_add_service_to_organization,
     dao_add_user_to_organization,
@@ -20,7 +26,10 @@ from app.dao.organization_dao import (
     dao_remove_user_from_organization,
     dao_update_organization,
 )
-from app.dao.services_dao import dao_fetch_service_by_id
+from app.dao.services_dao import (
+    dao_fetch_service_by_id,
+    dao_get_service_primary_contacts,
+)
 from app.dao.templates_dao import dao_get_template_by_id
 from app.dao.users_dao import get_user_by_id
 from app.enums import KeyType
@@ -36,6 +45,7 @@ from app.organization.organization_schema import (
     post_update_organization_schema,
 )
 from app.schema_validation import validate
+from app.utils import check_suspicious_id
 
 organization_blueprint = Blueprint("organization", __name__)
 register_errors(organization_blueprint)
@@ -64,6 +74,7 @@ def get_organizations():
 
 @organization_blueprint.route("/<uuid:organization_id>", methods=["GET"])
 def get_organization_by_id(organization_id):
+    check_suspicious_id(organization_id)
     organization = dao_get_organization_by_id(organization_id)
     return jsonify(organization.serialize())
 
@@ -97,6 +108,7 @@ def create_organization():
 
 @organization_blueprint.route("/<uuid:organization_id>", methods=["POST"])
 def update_organization(organization_id):
+    check_suspicious_id(organization_id)
     data = request.get_json()
     validate(data, post_update_organization_schema)
 
@@ -115,6 +127,7 @@ def update_organization(organization_id):
 
 @organization_blueprint.route("/<uuid:organization_id>/service", methods=["POST"])
 def link_service_to_organization(organization_id):
+    check_suspicious_id(organization_id)
     data = request.get_json()
     validate(data, post_link_service_to_organization_schema)
     service = dao_fetch_service_by_id(data["service_id"])
@@ -129,6 +142,7 @@ def link_service_to_organization(organization_id):
 
 @organization_blueprint.route("/<uuid:organization_id>/services", methods=["GET"])
 def get_organization_services(organization_id):
+    check_suspicious_id(organization_id)
     services = dao_get_organization_services(organization_id)
     sorted_services = sorted(services, key=lambda s: (-s.active, s.name))
     return jsonify([s.serialize_for_org_dashboard() for s in sorted_services])
@@ -138,10 +152,12 @@ def get_organization_services(organization_id):
     "/<uuid:organization_id>/services-with-usage", methods=["GET"]
 )
 def get_organization_services_usage(organization_id):
+    check_suspicious_id(organization_id)
     try:
         year = int(request.args.get("year", "none"))
     except ValueError:
         return jsonify(result="error", message="No valid year provided"), 400
+
     services = fetch_usage_year_for_organization(organization_id, year)
     list_services = services.values()
     sorted_services = sorted(
@@ -150,10 +166,52 @@ def get_organization_services_usage(organization_id):
     return jsonify(services=sorted_services)
 
 
+@organization_blueprint.route("/<uuid:organization_id>/dashboard", methods=["GET"])
+def get_organization_dashboard(organization_id):
+
+    check_suspicious_id(organization_id)
+
+    try:
+        year = int(request.args.get("year", "none"))
+    except ValueError:
+        return jsonify(result="error", message="No valid year provided"), 400
+
+    services_with_usage = fetch_usage_year_for_organization(
+        organization_id, year, include_all_services=True
+    )
+
+    service_ids = [service_data["service_id"] for service_data in services_with_usage.values()]
+
+    if not service_ids:
+        return jsonify(services=[]), 200
+
+    recent_templates = dao_get_recent_sms_template_per_service(service_ids)
+    primary_contacts = dao_get_service_primary_contacts(service_ids)
+
+    for service_data in services_with_usage.values():
+        service_uuid = service_data["service_id"]
+        service_data["recent_sms_template_name"] = recent_templates.get(service_uuid)
+        service_data["primary_contact"] = primary_contacts.get(service_uuid)
+
+    services_list = list(services_with_usage.values())
+    sorted_services = sorted(
+        services_list,
+        key=lambda s: (
+            0 if (s["active"] and not s["restricted"]) else
+            1 if (s["active"] and s["restricted"]) else
+            2,
+            s["service_name"].lower()
+        )
+    )
+
+    return jsonify(services=sorted_services)
+
+
 @organization_blueprint.route(
     "/<uuid:organization_id>/users/<uuid:user_id>", methods=["POST"]
 )
 def add_user_to_organization(organization_id, user_id):
+    check_suspicious_id(organization_id, user_id)
     new_org_user = dao_add_user_to_organization(organization_id, user_id)
     return jsonify(data=new_org_user.serialize())
 
@@ -162,6 +220,7 @@ def add_user_to_organization(organization_id, user_id):
     "/<uuid:organization_id>/users/<uuid:user_id>", methods=["DELETE"]
 )
 def remove_user_from_organization(organization_id, user_id):
+    check_suspicious_id(organization_id, user_id)
     organization = dao_get_organization_by_id(organization_id)
     user = get_user_by_id(user_id=user_id)
 
@@ -176,6 +235,7 @@ def remove_user_from_organization(organization_id, user_id):
 
 @organization_blueprint.route("/<uuid:organization_id>/users", methods=["GET"])
 def get_organization_users(organization_id):
+    check_suspicious_id(organization_id)
     org_users = dao_get_users_for_organization(organization_id)
     return jsonify(data=[x.serialize() for x in org_users])
 
@@ -249,4 +309,50 @@ def send_notifications_on_mou_signed(organization_id):
         current_app.config[signer_template_id],
         organization.agreement_signed_by.email_address,
         personalisation,
+    )
+
+
+@organization_blueprint.route(
+    "/<uuid:organization_id>/message-allowance", methods=["GET"]
+)
+def get_organization_message_allowance(organization_id):
+
+    check_suspicious_id(organization_id)
+
+    dao_get_organization_by_id(organization_id)
+
+    services = dao_get_organization_services(organization_id)
+
+    if not services:
+        return (
+            jsonify(
+                {
+                    "messages_sent": 0,
+                    "messages_remaining": 0,
+                    "total_message_limit": 0,
+                }
+            ),
+            200,
+        )
+
+    current_year = datetime.now(tz=ZoneInfo("UTC")).year
+    service_ids = [service.id for service in services]
+
+    messages_by_service = dao_get_notification_counts_per_service(
+        service_ids, current_year
+    )
+
+    total_messages_sent = sum(messages_by_service.get(s.id, 0) for s in services)
+    total_message_limit = sum(s.total_message_limit for s in services)
+    total_messages_remaining = total_message_limit - total_messages_sent
+
+    return (
+        jsonify(
+            {
+                "messages_sent": total_messages_sent,
+                "messages_remaining": total_messages_remaining,
+                "total_message_limit": total_message_limit,
+            }
+        ),
+        200,
     )

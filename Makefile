@@ -16,8 +16,7 @@ GIT_HOOKS_PATH ?= $(shell git config --global core.hooksPath || echo "")
 .PHONY: bootstrap
 bootstrap: ## Set up everything to run the app
 	make generate-version-file
-	poetry lock --no-update
-	poetry install --sync --no-root
+	poetry sync --no-root
 	poetry run pre-commit install
 	createdb notification_api || true
 	createdb test_notification_api || true
@@ -26,8 +25,7 @@ bootstrap: ## Set up everything to run the app
 .PHONY: bootstrap-with-git-hooks
 bootstrap-with-git-hooks:  ## Sets everything up and accounts for pre-existing git hooks
 	make generate-version-file
-	poetry lock --no-update
-	poetry install --sync --no-root
+	poetry sync --no-root
 	git config --global --unset-all core.hooksPath
 	poetry run pre-commit install
 	git config --global core.hookspath "${GIT_HOOKS_PATH}"
@@ -72,8 +70,8 @@ run-celery: ## Run celery, TODO remove purge for staging/prod
 		-A run_celery.notify_celery worker \
 		--pidfile="/tmp/celery.pid" \
 		--loglevel=INFO \
-		--pool=threads
-		--concurrency=10
+		--pool=gevent
+		--concurrency=20
 
 
 .PHONY: dead-code
@@ -106,25 +104,29 @@ test: ## Run tests and create coverage report
 	poetry run isort ./app ./tests
 	poetry run coverage run --omit=*/migrations/*,*/tests/* -m pytest --maxfail=10
 
-    ## TODO set this back to 95 asap
-	poetry run coverage report -m --fail-under=93
+
+	poetry run coverage report -m --fail-under=95
 	poetry run coverage html -d .coverage_cache
+
+.PHONY: test-debug
+test-debug:
+	poetry run pytest --pdb -x
 
 .PHONY: py-lock
 py-lock: ## Syncs dependencies and updates lock file without performing recursive internal updates
-	poetry lock --no-update
-	poetry install --sync
+	poetry sync --no-root
+	poetry lock
 
 .PHONY: freeze-requirements
 freeze-requirements: ## Pin all requirements including sub dependencies into requirements.txt
-	poetry export --without-hashes --format=requirements.txt > requirements.txt
+	poetry export --output > requirements.txt
 
 .PHONY: audit
 audit:
 	poetry requirements > requirements.txt
 	poetry requirements --dev > requirements_for_test.txt
-	poetry run pip-audit -r requirements.txt
-	poetry run pip-audit -r requirements_for_test.txt
+	poetry run pip-audit -r requirements.txt --skip-editable
+	poetry run pip-audit -r requirements_for_test.txt --skip-editable
 
 .PHONY: static-scan
 static-scan:

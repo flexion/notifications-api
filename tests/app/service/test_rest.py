@@ -1,11 +1,13 @@
 import json
 import uuid
 from datetime import date, datetime, timedelta
-from unittest.mock import ANY
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from flask import current_app, url_for
 from freezegun import freeze_time
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -26,6 +28,7 @@ from app.enums import (
     StatisticsType,
     TemplateType,
 )
+from app.errors import InvalidRequest
 from app.models import (
     AnnualBilling,
     EmailBranding,
@@ -37,6 +40,11 @@ from app.models import (
     ServicePermission,
     ServiceSmsSender,
     User,
+)
+from app.service.rest import (
+    check_request_args,
+    get_service_statistics_for_specific_days,
+    get_service_statistics_for_specific_days_by_user,
 )
 from app.utils import utc_now
 from tests import create_admin_authorization_header
@@ -738,6 +746,7 @@ def test_update_service(client, notify_db_session, sample_service):
         headers=[("Content-Type", "application/json"), auth_header],
     )
     result = resp.json
+
     assert resp.status_code == 200
     assert result["data"]["name"] == "updated service name"
     assert result["data"]["email_from"] == "updated.service.name"
@@ -1278,11 +1287,12 @@ def test_add_existing_user_to_another_service_with_all_permissions(
                 == user_already_in_service.email_address
             )
 
+            fake_password = "password"
             # add new user to service
             user_to_add = User(
                 name="Invited User",
                 email_address="invited@digital.fake.gov",
-                password="password",
+                password=fake_password,
                 mobile_number="+14254147755",
             )
             # they must exist in db first
@@ -2013,9 +2023,6 @@ def test_get_monthly_notification_stats_by_user(
         headers=[auth_header],
     )
 
-    resp = json.loads(response.get_data(as_text=True))
-    print(f"RESP is {resp}")
-    # TODO This test could be a little more complete
     assert response.status_code == 200
 
 
@@ -2040,8 +2047,6 @@ def test_get_single_month_notification_stats_by_user(
         headers=[auth_header],
     )
 
-    resp = json.loads(response.get_data(as_text=True))
-    print(f"RESP is {resp}")
     # TODO This test could be a little more complete
     assert response.status_code == 200
 
@@ -2064,9 +2069,6 @@ def test_get_single_month_notification_stats_for_service(
         headers=[auth_header],
     )
 
-    resp = json.loads(response.get_data(as_text=True))
-    print(f"RESP is {resp}")
-    # TODO This test could be a little more complete
     assert response.status_code == 200
 
 
@@ -2552,148 +2554,6 @@ def test_get_detailed_services_for_date_range(
     }
 
 
-@pytest.mark.skip(
-    reason="We can't search on recipient if recipient is not kept in the db"
-)
-def test_search_for_notification_by_to_field(
-    client, sample_template, sample_email_template
-):
-    notification1 = create_notification(
-        template=sample_template, to_field="+447700900855", normalised_to="447700900855"
-    )
-    notification2 = create_notification(
-        template=sample_email_template,
-        to_field="jack@gmail.com",
-        normalised_to="jack@gmail.com",
-    )
-
-    response = client.get(
-        f"/service/{notification1.service_id}/notifications?to={'jack@gmail.com'}"
-        f"&template_type={TemplateType.EMAIL}",
-        headers=[create_admin_authorization_header()],
-    )
-    notifications = json.loads(response.get_data(as_text=True))["notifications"]
-
-    assert response.status_code == 200
-    assert len(notifications) == 1
-    assert str(notification2.id) == notifications[0]["id"]
-
-
-@pytest.mark.skip(
-    reason="We can't search on recipient if recipient is not kept in the db"
-)
-def test_search_for_notification_by_to_field_return_empty_list_if_there_is_no_match(
-    client, sample_template, sample_email_template
-):
-    notification1 = create_notification(sample_template, to_field="+447700900855")
-    create_notification(sample_email_template, to_field="jack@gmail.com")
-
-    response = client.get(
-        f"/service/{notification1.service_id}/notifications?"
-        f"to={+447700900800}&template_type={TemplateType.SMS}",
-        headers=[create_admin_authorization_header()],
-    )
-    notifications = json.loads(response.get_data(as_text=True))["notifications"]
-
-    assert response.status_code == 200
-    assert len(notifications) == 0
-
-
-@pytest.mark.skip(
-    reason="We can't search on recipient if recipient is not kept in the db"
-)
-def test_search_for_notification_by_to_field_return_multiple_matches(
-    client, sample_template, sample_email_template
-):
-    notification1 = create_notification(
-        sample_template,
-        to_field="+447700900855",
-        normalised_to="447700900855",
-    )
-    notification2 = create_notification(
-        sample_template,
-        to_field=" +44 77009 00855 ",
-        normalised_to="447700900855",
-    )
-    notification3 = create_notification(
-        sample_template,
-        to_field="+44770 0900 855",
-        normalised_to="447700900855",
-    )
-    notification4 = create_notification(
-        sample_email_template,
-        to_field="jack@gmail.com",
-        normalised_to="jack@gmail.com",
-    )
-
-    response = client.get(
-        f"/service/{notification1.service_id}/notifications?"
-        f"to={+447700900855}&template_type={TemplateType.SMS}",
-        headers=[create_admin_authorization_header()],
-    )
-    notifications = json.loads(response.get_data(as_text=True))["notifications"]
-    notification_ids = [notification["id"] for notification in notifications]
-
-    assert response.status_code == 200
-    assert len(notifications) == 3
-
-    assert str(notification1.id) in notification_ids
-    assert str(notification2.id) in notification_ids
-    assert str(notification3.id) in notification_ids
-    assert str(notification4.id) not in notification_ids
-
-
-@pytest.mark.skip(
-    reason="We can't search on recipient if recipient is not kept in the db"
-)
-def test_search_for_notification_by_to_field_returns_next_link_if_more_than_50(
-    client, sample_template
-):
-    for _ in range(51):
-        create_notification(
-            sample_template,
-            to_field="+447700900855",
-            normalised_to="447700900855",
-        )
-
-    response = client.get(
-        f"/service/{sample_template.service_id}/notifications?"
-        f"to={+447700900855}&template_type={TemplateType.SMS}",
-        headers=[create_admin_authorization_header()],
-    )
-    assert response.status_code == 200
-    response_json = json.loads(response.get_data(as_text=True))
-
-    assert len(response_json["notifications"]) == 50
-    assert "prev" not in response_json["links"]
-    assert "page=2" in response_json["links"]["next"]
-
-
-@pytest.mark.skip(
-    reason="We can't search on recipient if recipient is not kept in the db"
-)
-def test_search_for_notification_by_to_field_returns_no_next_link_if_50_or_less(
-    client, sample_template
-):
-    for _ in range(50):
-        create_notification(
-            sample_template,
-            to_field="+447700900855",
-            normalised_to="447700900855",
-        )
-
-    response = client.get(
-        f"/service/{sample_template.service_id}/notifications?"
-        f"to={+447700900855}&template_type={TemplateType.SMS}",
-        headers=[create_admin_authorization_header()],
-    )
-    assert response.status_code == 200
-    response_json = json.loads(response.get_data(as_text=True))
-
-    assert len(response_json["notifications"]) == 50
-    assert response_json["links"] == {}
-
-
 def test_update_service_calls_send_notification_as_service_becomes_live(
     notify_db_session, client, mocker
 ):
@@ -2764,100 +2624,6 @@ def test_update_service_does_not_call_send_notification_when_restricted_not_chan
     assert not send_notification_mock.called
 
 
-@pytest.mark.skip(
-    reason="We can't search on recipient if recipient is not kept in the db"
-)
-def test_search_for_notification_by_to_field_filters_by_status(client, sample_template):
-    notification1 = create_notification(
-        sample_template,
-        to_field="+447700900855",
-        status=NotificationStatus.DELIVERED,
-        normalised_to="447700900855",
-    )
-    create_notification(
-        sample_template,
-        to_field="+447700900855",
-        status=NotificationStatus.SENDING,
-        normalised_to="447700900855",
-    )
-
-    response = client.get(
-        f"/service/{notification1.service_id}/notifications?to={+447700900855}"
-        f"&status={NotificationStatus.DELIVERED}&template_type={TemplateType.SMS}",
-        headers=[create_admin_authorization_header()],
-    )
-    notifications = json.loads(response.get_data(as_text=True))["notifications"]
-    notification_ids = [notification["id"] for notification in notifications]
-
-    assert response.status_code == 200
-    assert len(notifications) == 1
-    assert str(notification1.id) in notification_ids
-
-
-@pytest.mark.skip(
-    reason="We can't search on recipient if recipient is not kept in the db"
-)
-def test_search_for_notification_by_to_field_filters_by_statuses(
-    client, sample_template
-):
-    notification1 = create_notification(
-        sample_template,
-        to_field="+447700900855",
-        status=NotificationStatus.DELIVERED,
-        normalised_to="447700900855",
-    )
-    notification2 = create_notification(
-        sample_template,
-        to_field="+447700900855",
-        status=NotificationStatus.SENDING,
-        normalised_to="447700900855",
-    )
-
-    response = client.get(
-        f"/service/{notification1.service_id}/notifications?to={+447700900855}"
-        f"&status={NotificationStatus.DELIVERED}&status={NotificationStatus.SENDING}"
-        f"&template_type={TemplateType.SMS}",
-        headers=[create_admin_authorization_header()],
-    )
-    notifications = json.loads(response.get_data(as_text=True))["notifications"]
-    notification_ids = [notification["id"] for notification in notifications]
-
-    assert response.status_code == 200
-    assert len(notifications) == 2
-    assert str(notification1.id) in notification_ids
-    assert str(notification2.id) in notification_ids
-
-
-@pytest.mark.skip(
-    reason="We can't search on recipient if recipient is not kept in the db"
-)
-def test_search_for_notification_by_to_field_returns_content(
-    client, sample_template_with_placeholders
-):
-    notification = create_notification(
-        sample_template_with_placeholders,
-        to_field="+447700900855",
-        personalisation={"name": "Foo"},
-        normalised_to="447700900855",
-    )
-
-    response = client.get(
-        f"/service/{sample_template_with_placeholders.service_id}/notifications?"
-        f"to={+447700900855}&template_type={TemplateType.SMS}",
-        headers=[create_admin_authorization_header()],
-    )
-    notifications = json.loads(response.get_data(as_text=True))["notifications"]
-    assert response.status_code == 200
-    assert len(notifications) == 1
-
-    assert notifications[0]["id"] == str(notification.id)
-    assert notifications[0]["to"] == "+447700900855"
-    assert (
-        notifications[0]["template"]["content"]
-        == "Hello (( Name))\nYour thing is due soon"
-    )
-
-
 def test_send_one_off_notification(sample_service, admin_request, mocker):
     template = create_template(service=sample_service)
     mocker.patch("app.service.send_notification.send_notification_to_queue")
@@ -2912,80 +2678,6 @@ def test_get_all_notifications_for_service_includes_template_redacted(
 
     assert resp["notifications"][1]["id"] == str(redacted_noti.id)
     assert resp["notifications"][1]["template"]["redact_personalisation"] is True
-
-
-# TODO: check whether all hidden templates are also precompiled letters
-# def test_get_all_notifications_for_service_includes_template_hidden(admin_request, sample_service):
-#     letter_template = create_template(sample_service, template_type=TemplateType.LETTER)
-
-#     with freeze_time('2000-01-01'):
-#         letter_noti = create_notification(letter_template)
-
-#     resp = admin_request.get(
-#         'service.get_all_notifications_for_service',
-#         service_id=sample_service.id
-#     )
-
-#     assert resp['notifications'][0]['id'] == str(precompiled_noti.id)
-#     assert resp['notifications'][0]['template']['is_precompiled_letter'] is True
-
-#     assert resp['notifications'][1]['id'] == str(letter_noti.id)
-#     assert resp['notifications'][1]['template']['is_precompiled_letter'] is False
-
-
-@pytest.mark.skip(
-    reason="We can't search on recipient if recipient is not kept in the db"
-)
-def test_search_for_notification_by_to_field_returns_personlisation(
-    client, sample_template_with_placeholders
-):
-    create_notification(
-        sample_template_with_placeholders,
-        to_field="+447700900855",
-        personalisation={"name": "Foo"},
-        normalised_to="447700900855",
-    )
-
-    response = client.get(
-        f"/service/{sample_template_with_placeholders.service_id}/notifications?"
-        f"to={+447700900855}&template_type={TemplateType.SMS}",
-        headers=[create_admin_authorization_header()],
-    )
-    notifications = json.loads(response.get_data(as_text=True))["notifications"]
-
-    assert response.status_code == 200
-    assert len(notifications) == 1
-    assert "personalisation" in notifications[0].keys()
-    assert notifications[0]["personalisation"]["name"] == "Foo"
-
-
-@pytest.mark.skip(
-    reason="We can't search on recipient if recipient is not kept in the db"
-)
-def test_search_for_notification_by_to_field_returns_notifications_by_type(
-    client, sample_template, sample_email_template
-):
-    sms_notification = create_notification(
-        sample_template,
-        to_field="+447700900855",
-        normalised_to="447700900855",
-    )
-    create_notification(
-        sample_email_template,
-        to_field="44770@gamil.com",
-        normalised_to="44770@gamil.com",
-    )
-
-    response = client.get(
-        f"/service/{sms_notification.service_id}/notifications?to={'0770'}"
-        f"&template_type={TemplateType.SMS}",
-        headers=[create_admin_authorization_header()],
-    )
-    notifications = json.loads(response.get_data(as_text=True))["notifications"]
-
-    assert response.status_code == 200
-    assert len(notifications) == 1
-    assert notifications[0]["id"] == str(sms_notification.id)
 
 
 def test_get_email_reply_to_addresses_when_there_are_no_reply_to_email_addresses(
@@ -3442,6 +3134,38 @@ def test_update_service_sms_sender(client, notify_db_session):
     assert not resp_json["is_default"]
 
 
+@settings(max_examples=10)
+@given(
+    fuzzed_sms_sender=st.text(min_size=1, max_size=50), fuzzed_is_default=st.booleans()
+)
+def test_fuzz_update_service_sms_sender(client, fuzzed_sms_sender, fuzzed_is_default):
+    service = create_service(service_name=f"service-{uuid.uuid4()}")
+    service_sms_sender = create_service_sms_sender(
+        service=service, sms_sender="1235", is_default=False
+    )
+    data = {
+        "sms_sender": fuzzed_sms_sender,
+        "is_default": fuzzed_is_default,
+    }
+    response = client.post(
+        f"/service/{service.id}/sms-sender/{service_sms_sender.id}",
+        data=json.dumps(data),
+        headers=[
+            ("Content-Type", "application/json"),
+            create_admin_authorization_header(),
+        ],
+    )
+    assert response.status_code in [
+        200,
+        400,
+    ], f"Unexpected status: {response.status_code}, body: {response.get_data(as_text=True)}"
+
+    if response.status_code == 200:
+        resp_json = json.loads(response.get_data(as_text=True))
+        assert resp_json["sms_sender"] == fuzzed_sms_sender
+        assert resp_json["is_default"] == fuzzed_is_default
+
+
 def test_update_service_sms_sender_switches_default(client, notify_db_session):
     service = create_service_with_defined_sms_sender(sms_sender_value="first")
     service_sms_sender = create_service_sms_sender(
@@ -3734,22 +3458,140 @@ def test_get_service_notification_statistics_by_day(
     assert response == mock_data
 
 
-# def test_valid_request():
-#     request = MagicMock()
-#     request.args = {
-#         "service_id": "123",
-#         "name": "Test Name",
-#         "email_from": "test@example.com",
-#     }
-#     result = check_request_args(request)
-#     assert result == ("123", "Test Name", "test@example.com")
+@patch("app.service.rest.check_suspicious_id")
+@patch("app.service.rest.dao_fetch_stats_for_service_from_hours")
+@patch("app.service.rest.get_specific_hours_stats")
+def test_get_service_statistics_for_specific_days(
+    mock_get_stats, mock_fetch_stats, mock_check_id
+):
+    service_id = "test-service"
+    start_date_str = "2025-07-01"
+    days = 2
+
+    fake_total_notifications = {
+        datetime(2025, 6, 30, 12): 100,
+        datetime(2025, 6, 30, 13): 200,
+    }
+    fake_results = [
+        MagicMock(
+            notification_type="email",
+            status="delivered",
+            hour=datetime(2025, 6, 30, 12),
+            count=50,
+        ),
+        MagicMock(
+            notification_type="sms",
+            status="failed",
+            hour=datetime(2025, 6, 30, 13),
+            count=150,
+        ),
+    ]
+    mock_fetch_stats.return_value = (fake_total_notifications, fake_results)
+    expected_output = {"emails_sent": 50, "sms_failed": 150}
+    mock_get_stats.return_value = expected_output
+    result = get_service_statistics_for_specific_days(service_id, start_date_str, days)
+    assert result == expected_output
+    mock_check_id.assert_called_once_with(service_id)
+    expected_start = datetime(2025, 6, 30)
+    expected_end = datetime(2025, 7, 1)
+    mock_fetch_stats.assert_called_once_with(service_id, expected_start, expected_end)
+    mock_get_stats.assert_called_once_with(
+        fake_results,
+        expected_start,
+        hours=48,
+        total_notifications=fake_total_notifications,
+    )
 
 
-# def test_missing_service_id():
-#     request = MagicMock()
-#     request.args = {"name": "Test Name", "email_from": "test@example.com"}
-#     try:
-#         check_request_args(request)
-#     except Exception as e:
-#         assert e.status_code == 400
-#         assert {"service_id": ["Can't be empty"] in e.errors}
+@patch("app.service.rest.dao_fetch_stats_for_service_from_days_for_user")
+@patch("app.service.rest.get_specific_hours_stats")
+def test_get_service_statistics_for_specific_days_by_user(
+    mock_get_stats, mock_fetch_stats
+):
+    service_id = "service-abc"
+    user_id = "user-123"
+    start_date_str = "2025-07-01"
+    days = 3
+    expected_end = datetime(2025, 7, 1)
+    expected_start = expected_end - timedelta(days=days - 1)
+
+    mock_total_notifications = {
+        datetime(2025, 6, 29, 10): 5,
+        datetime(2025, 6, 30, 12): 8,
+    }
+    mock_results = [
+        MagicMock(
+            notification_type="email",
+            status="delivered",
+            hour=datetime(2025, 6, 29, 10),
+            count=5,
+        ),
+        MagicMock(
+            notification_type="sms",
+            status="sent",
+            hour=datetime(2025, 6, 30, 12),
+            count=8,
+        ),
+    ]
+
+    mock_fetch_stats.return_value = (mock_total_notifications, mock_results)
+    expected_stats = {"emails_delivered": 5, "sms_sent": 8}
+    mock_get_stats.return_value = expected_stats
+    result = get_service_statistics_for_specific_days_by_user(
+        service_id, user_id, start_date_str, days
+    )
+    assert result == expected_stats
+    mock_fetch_stats.assert_called_once_with(
+        service_id, expected_start, expected_end, user_id
+    )
+    mock_get_stats.assert_called_once_with(
+        mock_results,
+        expected_start,
+        hours=days * 24,
+        total_notifications=mock_total_notifications,
+    )
+
+
+def test_check_request_args_success():
+    mock_request = MagicMock()
+    mock_request.args.get.side_effect = lambda key, default=None: {
+        "service_id": "abc123",
+        "name": "test service",
+        "email_from": "test@example.com",
+    }.get(key, default)
+
+    result = check_request_args(mock_request)
+    assert result == ("abc123", "test service", "test@example.com")
+
+
+@pytest.mark.parametrize(
+    "args_dict,expected_errors",
+    [
+        (
+            {},
+            [
+                {"service_id": ["Can't be empty"]},
+                {"name": ["Can't be empty"]},
+                {"email_from": ["Can't be empty"]},
+            ],
+        ),
+        (
+            {"service_id": "abc123"},
+            [{"name": ["Can't be empty"]}, {"email_from": ["Can't be empty"]}],
+        ),
+        (
+            {"service_id": "abc123", "name": "Test"},
+            [{"email_from": ["Can't be empty"]}],
+        ),
+    ],
+)
+def test_check_request_args_missing_fields(args_dict, expected_errors):
+    mock_request = MagicMock()
+    mock_request.args.get.side_effect = lambda key, default=None: args_dict.get(
+        key, default
+    )
+    with pytest.raises(InvalidRequest) as exc:
+        check_request_args(mock_request)
+
+    assert exc.value.status_code == 400
+    assert exc.value.message == expected_errors

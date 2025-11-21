@@ -3,7 +3,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.exc import NoResultFound
 
 from app.dao.dao_utils import autocommit
-from app.dao.service_user_dao import dao_get_active_service_users, dao_get_service_user
+from app.dao.service_user_dao import dao_get_service_user
 from app.dao.services_dao import dao_fetch_service_by_id
 from app.dao.template_folder_dao import (
     dao_create_template_folder,
@@ -20,6 +20,7 @@ from app.template_folder.template_folder_schema import (
     post_move_template_folder_schema,
     post_update_template_folder_schema,
 )
+from app.utils import check_suspicious_id
 
 template_folder_blueprint = Blueprint(
     "template_folder", __name__, url_prefix="/service/<uuid:service_id>/template-folder"
@@ -37,6 +38,7 @@ def handle_integrity_error(exc):
 
 @template_folder_blueprint.route("", methods=["GET"])
 def get_template_folders_for_service(service_id):
+    check_suspicious_id(service_id)
     service = dao_fetch_service_by_id(service_id)
 
     template_folders = [o.serialize() for o in service.all_template_folders]
@@ -45,6 +47,7 @@ def get_template_folders_for_service(service_id):
 
 @template_folder_blueprint.route("", methods=["POST"])
 def create_template_folder(service_id):
+    check_suspicious_id(service_id)
     data = request.get_json()
 
     validate(data, post_create_template_folder_schema)
@@ -57,7 +60,11 @@ def create_template_folder(service_id):
         except NoResultFound:
             raise InvalidRequest("parent_id not found", status_code=400)
     else:
-        users_with_permission = dao_get_active_service_users(service_id)
+        users_with_permission = []
+        if data.get("created_by_id"):
+            creator = dao_get_service_user(data["created_by_id"], service_id)
+            if creator:
+                users_with_permission = [creator]
     template_folder = TemplateFolder(
         service_id=service_id,
         name=data["name"].strip(),
@@ -72,6 +79,7 @@ def create_template_folder(service_id):
 
 @template_folder_blueprint.route("/<uuid:template_folder_id>", methods=["POST"])
 def update_template_folder(service_id, template_folder_id):
+    check_suspicious_id(service_id, template_folder_id)
     data = request.get_json()
 
     validate(data, post_update_template_folder_schema)
@@ -93,6 +101,7 @@ def update_template_folder(service_id, template_folder_id):
 
 @template_folder_blueprint.route("/<uuid:template_folder_id>", methods=["DELETE"])
 def delete_template_folder(service_id, template_folder_id):
+    check_suspicious_id(service_id, template_folder_id)
     template_folder = dao_get_template_folder_by_id_and_service_id(
         template_folder_id, service_id
     )
@@ -112,6 +121,8 @@ def delete_template_folder(service_id, template_folder_id):
 )
 @autocommit
 def move_to_template_folder(service_id, target_template_folder_id=None):
+    check_suspicious_id(service_id, target_template_folder_id)
+
     data = request.get_json()
 
     validate(data, post_move_template_folder_schema)

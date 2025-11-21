@@ -32,7 +32,7 @@ from app.dao.users_dao import (
     save_user_attribute,
     use_user_code,
 )
-from app.enums import CodeType, KeyType, NotificationType, TemplateType
+from app.enums import CodeType, KeyType, NotificationType, TemplateType, UserState
 from app.errors import InvalidRequest, register_errors
 from app.models import Permission, Service
 from app.notifications.process_notifications import (
@@ -53,7 +53,13 @@ from app.user.users_schema import (
     post_verify_code_schema,
     post_verify_webauthn_schema,
 )
-from app.utils import debug_not_production, hilite, url_with_token, utc_now
+from app.utils import (
+    check_suspicious_id,
+    debug_not_production,
+    hilite,
+    url_with_token,
+    utc_now,
+)
 from notifications_utils.recipients import is_us_phone_number, use_numeric_sender
 
 user_blueprint = Blueprint("user", __name__)
@@ -83,6 +89,7 @@ def handle_integrity_error(exc):
 
 @user_blueprint.route("", methods=["POST"])
 def create_user():
+    current_app.logger.info("#invites: enter create_user()")
     req_json = request.get_json()
     user_to_create = create_user_schema.load(req_json)
 
@@ -90,11 +97,13 @@ def create_user():
         user_to_create, password=req_json.get("password"), validated_email_access=True
     )
     result = user_to_create.serialize()
+    current_app.logger.info("#invites: returning the new user")
     return jsonify(data=result), 201
 
 
 @user_blueprint.route("/<uuid:user_id>", methods=["POST"])
 def update_user_attribute(user_id):
+    check_suspicious_id(user_id)
     user_to_update = get_user_by_id(user_id=user_id)
     req_json = request.get_json()
     if "updated_by" in req_json:
@@ -159,6 +168,7 @@ def get_sms_reply_to_for_notify_service(recipient, template):
 
 @user_blueprint.route("/<uuid:user_id>/archive", methods=["POST"])
 def archive_user(user_id):
+    check_suspicious_id(user_id)
     user = get_user_by_id(user_id)
     dao_archive_user(user)
 
@@ -167,28 +177,31 @@ def archive_user(user_id):
 
 @user_blueprint.route("/<uuid:user_id>/activate", methods=["POST"])
 def activate_user(user_id):
+    check_suspicious_id(user_id)
     user = get_user_by_id(user_id=user_id)
-    if user.state == "active":
+    if user.state == UserState.ACTIVE:
         raise InvalidRequest("User already active", status_code=400)
 
-    user.state = "active"
+    user.state = UserState.ACTIVE
     save_model_user(user)
     return jsonify(data=user.serialize()), 200
 
 
 @user_blueprint.route("/<uuid:user_id>/deactivate", methods=["POST"])
 def deactivate_user(user_id):
+    check_suspicious_id(user_id)
     user = get_user_by_id(user_id=user_id)
-    if user.state == "pending":
+    if user.state == UserState.PENDING:
         raise InvalidRequest("User already inactive", status_code=400)
 
-    user.state = "pending"
+    user.state = UserState.PENDING
     save_model_user(user)
     return jsonify(data=user.serialize()), 200
 
 
 @user_blueprint.route("/<uuid:user_id>/reset-failed-login-count", methods=["POST"])
 def user_reset_failed_login_count(user_id):
+    check_suspicious_id(user_id)
     user_to_update = get_user_by_id(user_id=user_id)
     reset_failed_login_count(user_to_update)
     return jsonify(data=user_to_update.serialize()), 200
@@ -196,6 +209,7 @@ def user_reset_failed_login_count(user_id):
 
 @user_blueprint.route("/<uuid:user_id>/verify/password", methods=["POST"])
 def verify_user_password(user_id):
+    check_suspicious_id(user_id)
     user_to_verify = get_user_by_id(user_id=user_id)
 
     try:
@@ -217,6 +231,7 @@ def verify_user_password(user_id):
 
 @user_blueprint.route("/<uuid:user_id>/verify/code", methods=["POST"])
 def verify_user_code(user_id):
+    check_suspicious_id(user_id)
     data = request.get_json()
     validate(data, post_verify_code_schema)
 
@@ -251,6 +266,7 @@ def verify_user_code(user_id):
 @user_blueprint.route("/<uuid:user_id>/complete/webauthn-login", methods=["POST"])
 @user_blueprint.route("/<uuid:user_id>/verify/webauthn-login", methods=["POST"])
 def complete_login_after_webauthn_authentication_attempt(user_id):
+    check_suspicious_id(user_id)
     """
     complete login after a webauthn authentication. There's nothing webauthn specific in this code
     but the sms/email flows do this as part of `verify_user_code` above and this is the equivalent spot in the
@@ -283,6 +299,7 @@ def complete_login_after_webauthn_authentication_attempt(user_id):
 
 @user_blueprint.route("/<uuid:user_id>/<code_type>-code", methods=["POST"])
 def send_user_2fa_code(user_id, code_type):
+    check_suspicious_id(user_id)
     user_to_send_to = get_user_by_id(user_id=user_id)
 
     if count_user_verify_codes(user_to_send_to) >= current_app.config.get(
@@ -386,6 +403,7 @@ def create_2fa_code(
 
 @user_blueprint.route("/<uuid:user_id>/change-email-verification", methods=["POST"])
 def send_user_confirm_new_email(user_id):
+    check_suspicious_id(user_id)
     user_to_send_to = get_user_by_id(user_id=user_id)
 
     email = email_data_request_schema.load(request.get_json())
@@ -425,6 +443,7 @@ def send_user_confirm_new_email(user_id):
 
 @user_blueprint.route("/<uuid:user_id>/email-verification", methods=["POST"])
 def send_new_user_email_verification(user_id):
+    check_suspicious_id(user_id)
     current_app.logger.info("Sending email verification for user {}".format(user_id))
     request_json = request.get_json()
 
@@ -436,8 +455,6 @@ def send_new_user_email_verification(user_id):
     )
     service = db.session.get(Service, current_app.config["NOTIFY_SERVICE_ID"])
 
-    current_app.logger.info("template.id is {}".format(template.id))
-    current_app.logger.info("service.id is {}".format(service.id))
     personalisation = {
         "name": user_to_send_to.name,
         "url": _create_verification_url(
@@ -468,29 +485,28 @@ def send_new_user_email_verification(user_id):
         json.dumps(personalisation),
         ex=60 * 60,
     )
-    current_app.logger.info("Sending notification to queue")
+    current_app.logger.debug("Sending notification to queue")
 
     send_notification_to_queue(saved_notification, queue=QueueNames.NOTIFY)
 
-    current_app.logger.info("Sent notification to queue")
+    current_app.logger.debug("Sent notification to queue")
 
     return jsonify({}), 204
 
 
 @user_blueprint.route("/<uuid:user_id>/email-already-registered", methods=["POST"])
 def send_already_registered_email(user_id):
-    current_app.logger.info("Email already registered for user {}".format(user_id))
+    check_suspicious_id(user_id)
+    current_app.logger.debug("Email already registered for user {}".format(user_id))
     to = email_data_request_schema.load(request.get_json())
 
-    current_app.logger.info("To email is {}".format(to["email"]))
+    current_app.logger.debug("To email is {}".format(to["email"]))
 
     template = dao_get_template_by_id(
         current_app.config["ALREADY_REGISTERED_EMAIL_TEMPLATE_ID"]
     )
     service = db.session.get(Service, current_app.config["NOTIFY_SERVICE_ID"])
 
-    current_app.logger.info("template.id is {}".format(template.id))
-    current_app.logger.info("service.id is {}".format(service.id))
     personalisation = {
         "signin_url": current_app.config["ADMIN_BASE_URL"] + "/sign-in",
         "forgot_password_url": current_app.config["ADMIN_BASE_URL"]
@@ -510,8 +526,6 @@ def send_already_registered_email(user_id):
     )
     saved_notification.personalisation = personalisation
 
-    current_app.logger.info("Sending notification to queue")
-
     redis_store.set(
         f"email-personalisation-{saved_notification.id}",
         json.dumps(personalisation),
@@ -520,14 +534,13 @@ def send_already_registered_email(user_id):
 
     send_notification_to_queue(saved_notification, queue=QueueNames.NOTIFY)
 
-    current_app.logger.info("Sent notification to queue")
-
     return jsonify({}), 204
 
 
 @user_blueprint.route("/<uuid:user_id>", methods=["GET"])
 @user_blueprint.route("", methods=["GET"])
 def get_user(user_id=None):
+    check_suspicious_id(user_id)
     users = get_user_by_id(user_id=user_id)
     result = (
         [x.serialize() for x in users] if isinstance(users, list) else users.serialize()
@@ -539,6 +552,7 @@ def get_user(user_id=None):
     "/<uuid:user_id>/service/<uuid:service_id>/permission", methods=["POST"]
 )
 def set_permissions(user_id, service_id):
+    check_suspicious_id(user_id, service_id)
     # TODO fix security hole, how do we verify that the user
     # who is making this request has permission to make the request.
     service_user = dao_get_service_user(user_id, service_id)
@@ -577,14 +591,22 @@ def set_permissions(user_id, service_id):
 
 @user_blueprint.route("/get-login-gov-user", methods=["POST"])
 def get_user_login_gov_user():
+    current_app.logger.info("#invites: enter get_user_login_gov_user")
     request_args = request.get_json()
     login_uuid = request_args["login_uuid"]
     email = request_args["email"]
+    current_app.logger.info(
+        f"#invites: login_uuid {login_uuid} email is null? {email is None}"
+    )
+
     user = get_login_gov_user(login_uuid, email)
 
     if user is None:
+        current_app.logger.info("#invites: couldn't find user, returning empty data")
         return jsonify({})
+    current_app.logger.debug("#invites: found the user, serializing")
     result = user.serialize()
+    current_app.logger.info("#invites: returning successfully")
     return jsonify(data=result)
 
 
@@ -595,9 +617,7 @@ def fetch_user_by_email():
             hilite(f"enter fetch_user_by_email with {request.get_json()}")
         )
         email = email_data_request_schema.load(request.get_json())
-        debug_not_production(hilite(f"request schema loads {email}"))
         fetched_user = get_user_by_email(email["email"])
-        debug_not_production(hilite(f"fetched user is {fetched_user}"))
         result = fetched_user.serialize()
         return jsonify(data=result)
     except Exception as e:
@@ -651,6 +671,7 @@ def report_all_users():
 
 @user_blueprint.route("/<uuid:user_id>/organizations-and-services", methods=["GET"])
 def get_organizations_and_services_for_user(user_id):
+    check_suspicious_id(user_id)
     user = get_user_and_accounts(user_id)
     data = get_orgs_and_services(user)
     return jsonify(data)

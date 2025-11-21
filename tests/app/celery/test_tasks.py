@@ -1,20 +1,23 @@
+import io
 import json
 import uuid
 from datetime import datetime, timedelta
-from unittest.mock import ANY, MagicMock, Mock, call
+from unittest.mock import ANY, MagicMock, Mock, call, patch
 
 import pytest
 import requests_mock
 from celery.exceptions import Retry
 from freezegun import freeze_time
+from psycopg2 import IntegrityError
 from requests import RequestException
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 
-from app import db, encryption
+from app import db, get_encryption
 from app.celery import provider_tasks, tasks
 from app.celery.tasks import (
     __total_sending_limits_for_job_exceeded,
+    _generate_notifications_report,
     get_recipient_csv_and_template_and_sender_id,
     process_incomplete_job,
     process_incomplete_jobs,
@@ -22,6 +25,7 @@ from app.celery.tasks import (
     process_row,
     s3,
     save_api_email,
+    save_api_email_or_sms,
     save_api_sms,
     save_email,
     save_sms,
@@ -54,6 +58,8 @@ from tests.app.db import (
     create_template,
     create_user,
 )
+
+encryption = get_encryption()
 
 
 class AnyStringWith(str):
@@ -95,25 +101,24 @@ def test_should_process_sms_job(sample_job, mocker):
         return_value=(load_example_csv("sms"), {"sender_id": None}),
     )
     mocker.patch("app.celery.tasks.save_sms.apply_async")
-    mocker.patch("app.encryption.encrypt", return_value="something_encrypted")
+    mock_encrypt = mocker.patch("app.celery.tasks.encryption.encrypt")
     mocker.patch("app.celery.tasks.create_uuid", return_value="uuid")
 
     process_job(sample_job.id)
     s3.get_job_and_metadata_from_s3.assert_called_once_with(
         service_id=str(sample_job.service.id), job_id=str(sample_job.id)
     )
-    assert encryption.encrypt.call_args[0][0]["to"] == "+14254147755"
-    assert encryption.encrypt.call_args[0][0]["template"] == str(sample_job.template.id)
+    assert mock_encrypt.call_args[0][0]["to"] == "+14254147755"
+    assert mock_encrypt.call_args[0][0]["template"] == str(sample_job.template.id)
     assert (
-        encryption.encrypt.call_args[0][0]["template_version"]
-        == sample_job.template.version
+        mock_encrypt.call_args[0][0]["template_version"] == sample_job.template.version
     )
-    assert encryption.encrypt.call_args[0][0]["personalisation"] == {
+    assert mock_encrypt.call_args[0][0]["personalisation"] == {
         "phonenumber": "+14254147755"
     }
-    assert encryption.encrypt.call_args[0][0]["row_number"] == 0
+    assert mock_encrypt.call_args[0][0]["row_number"] == 0
     tasks.save_sms.apply_async.assert_called_once_with(
-        (str(sample_job.service_id), "uuid", "something_encrypted"),
+        (str(sample_job.service_id), "uuid", ANY),
         {},
         queue="database-tasks",
         expires=ANY,
@@ -128,13 +133,12 @@ def test_should_process_sms_job_with_sender_id(sample_job, mocker, fake_uuid):
         return_value=(load_example_csv("sms"), {"sender_id": fake_uuid}),
     )
     mocker.patch("app.celery.tasks.save_sms.apply_async")
-    mocker.patch("app.encryption.encrypt", return_value="something_encrypted")
     mocker.patch("app.celery.tasks.create_uuid", return_value="uuid")
 
     process_job(sample_job.id, sender_id=fake_uuid)
 
     tasks.save_sms.apply_async.assert_called_once_with(
-        (str(sample_job.service_id), "uuid", "something_encrypted"),
+        (str(sample_job.service_id), "uuid", ANY),
         {"sender_id": fake_uuid},
         queue="database-tasks",
         expires=ANY,
@@ -165,7 +169,6 @@ def test_should_process_job_if_send_limits_are_not_exceeded(
         return_value=(load_example_csv("multiple_email"), {"sender_id": None}),
     )
     mocker.patch("app.celery.tasks.save_email.apply_async")
-    mocker.patch("app.encryption.encrypt", return_value="something_encrypted")
     mocker.patch("app.celery.tasks.create_uuid", return_value="uuid")
     process_job(job.id)
 
@@ -178,7 +181,7 @@ def test_should_process_job_if_send_limits_are_not_exceeded(
         (
             str(job.service_id),
             "uuid",
-            "something_encrypted",
+            ANY,
         ),
         {},
         queue="database-tasks",
@@ -212,8 +215,9 @@ def test_should_process_email_job(email_job_with_placeholders, mocker):
         return_value=(email_csv, {"sender_id": None}),
     )
     mocker.patch("app.celery.tasks.save_email.apply_async")
-    mocker.patch("app.encryption.encrypt", return_value="something_encrypted")
     mocker.patch("app.celery.tasks.create_uuid", return_value="uuid")
+
+    mock_encrypt = mocker.patch("app.celery.tasks.encryption.encrypt")
 
     process_job(email_job_with_placeholders.id)
 
@@ -221,15 +225,15 @@ def test_should_process_email_job(email_job_with_placeholders, mocker):
         service_id=str(email_job_with_placeholders.service.id),
         job_id=str(email_job_with_placeholders.id),
     )
-    assert encryption.encrypt.call_args[0][0]["to"] == "test@test.com"
-    assert encryption.encrypt.call_args[0][0]["template"] == str(
+    assert mock_encrypt.call_args[0][0]["to"] == "test@test.com"
+    assert mock_encrypt.call_args[0][0]["template"] == str(
         email_job_with_placeholders.template.id
     )
     assert (
-        encryption.encrypt.call_args[0][0]["template_version"]
+        mock_encrypt.call_args[0][0]["template_version"]
         == email_job_with_placeholders.template.version
     )
-    assert encryption.encrypt.call_args[0][0]["personalisation"] == {
+    assert mock_encrypt.call_args[0][0]["personalisation"] == {
         "emailaddress": "test@test.com",
         "name": "foo",
     }
@@ -237,7 +241,7 @@ def test_should_process_email_job(email_job_with_placeholders, mocker):
         (
             str(email_job_with_placeholders.service_id),
             "uuid",
-            "something_encrypted",
+            ANY,
         ),
         {},
         queue="database-tasks",
@@ -258,13 +262,12 @@ def test_should_process_email_job_with_sender_id(
         return_value=(email_csv, {"sender_id": fake_uuid}),
     )
     mocker.patch("app.celery.tasks.save_email.apply_async")
-    mocker.patch("app.encryption.encrypt", return_value="something_encrypted")
     mocker.patch("app.celery.tasks.create_uuid", return_value="uuid")
 
     process_job(email_job_with_placeholders.id, sender_id=fake_uuid)
 
     tasks.save_email.apply_async.assert_called_once_with(
-        (str(email_job_with_placeholders.service_id), "uuid", "something_encrypted"),
+        (str(email_job_with_placeholders.service_id), "uuid", ANY),
         {"sender_id": fake_uuid},
         queue="database-tasks",
         expires=ANY,
@@ -277,8 +280,9 @@ def test_should_process_all_sms_job(sample_job_with_placeholdered_template, mock
         return_value=(load_example_csv("multiple_sms"), {"sender_id": None}),
     )
     mocker.patch("app.celery.tasks.save_sms.apply_async")
-    mocker.patch("app.encryption.encrypt", return_value="something_encrypted")
     mocker.patch("app.celery.tasks.create_uuid", return_value="uuid")
+
+    mock_encrypt = mocker.patch("app.celery.tasks.encryption.encrypt")
 
     process_job(sample_job_with_placeholdered_template.id)
 
@@ -286,15 +290,15 @@ def test_should_process_all_sms_job(sample_job_with_placeholdered_template, mock
         service_id=str(sample_job_with_placeholdered_template.service.id),
         job_id=str(sample_job_with_placeholdered_template.id),
     )
-    assert encryption.encrypt.call_args[0][0]["to"] == "+14254147755"
-    assert encryption.encrypt.call_args[0][0]["template"] == str(
+    assert mock_encrypt.call_args[0][0]["to"] == "+14254147755"
+    assert mock_encrypt.call_args[0][0]["template"] == str(
         sample_job_with_placeholdered_template.template.id
     )
     assert (
-        encryption.encrypt.call_args[0][0]["template_version"]
+        mock_encrypt.call_args[0][0]["template_version"]
         == sample_job_with_placeholdered_template.template.version
     )  # noqa
-    assert encryption.encrypt.call_args[0][0]["personalisation"] == {
+    assert mock_encrypt.call_args[0][0]["personalisation"] == {
         "phonenumber": "+14254147755",
         "name": "chris",
     }
@@ -1721,3 +1725,164 @@ def test_total_sending_limits_exceeded(mocker):
     assert mock_job.job_status == "sending limits exceeded"
     assert mock_job.processing_finished == datetime(2024, 11, 10, 12, 0, 0)
     mock_dao_update_job.assert_called_once_with(mock_job)
+
+
+def test_save_api_email_or_sms_integrity_error():
+    mock_self = MagicMock()
+    encrypted = MagicMock()
+    decrypted = {
+        "id": "notif-id",
+        "service_id": "service-id",
+        "notification_type": "email",
+        "template_id": "template-id",
+        "template_version": 1,
+        "to": "test@example.com",
+        "client_reference": None,
+        "created_at": "2025-01-01T00:00:00",
+        "reply_to_text": None,
+        "status": "created",
+        "document_download_count": 0,
+    }
+
+    with patch("app.celery.tasks.encryption.decrypt", return_value=decrypted), patch(
+        "app.celery.tasks.SerialisedService.from_id"
+    ), patch("app.celery.tasks.get_notification", return_value=None), patch(
+        "app.celery.tasks.persist_notification",
+        side_effect=IntegrityError("msg", None, None),
+    ), patch(
+        "app.celery.tasks.current_app.logger.warning"
+    ) as mock_log:
+
+        with pytest.raises(IntegrityError):
+            save_api_email_or_sms(mock_self, encrypted)
+            mock_log.assert_called_once()
+            assert "already exists" in mock_log.call_args[0][0]
+            mock_self.retry.assert_not_called()
+
+
+def test_save_api_email_or_sms_sqlalchemy_error_with_max_retries():
+    encrypted = MagicMock()
+    decrypted = {
+        "id": "notif-id",
+        "service_id": "svc-id",
+        "notification_type": "sms",
+        "template_id": "template-id",
+        "template_version": 1,
+        "to": "+15555555",
+        "client_reference": None,
+        "created_at": "2025-01-01T00:00:00",
+        "reply_to_text": "",
+        "status": "created",
+        "document_download_count": 0,
+    }
+
+    class FakeMaxRetriesExceeded(Exception):
+        pass
+
+    mock_self = MagicMock()
+    mock_self.retry.side_effect = FakeMaxRetriesExceeded
+    mock_self.MaxRetriesExceededError = FakeMaxRetriesExceeded
+
+    with patch("app.celery.tasks.encryption.decrypt", return_value=decrypted), patch(
+        "app.celery.tasks.SerialisedService.from_id"
+    ), patch("app.celery.tasks.get_notification", return_value=None), patch(
+        "app.celery.tasks.persist_notification", side_effect=SQLAlchemyError("db issue")
+    ), patch(
+        "app.celery.tasks.current_app.logger.exception"
+    ) as mock_exception:
+
+        save_api_email_or_sms(mock_self, encrypted)
+        mock_exception.assert_called_once()
+        assert "Max retry failed" in mock_exception.call_args[0][0]
+
+
+def get_mock_notification():
+    notif = MagicMock()
+    notif.job_id = "job-id"
+    notif.service_id = "service-id"
+    notif.job_row_number = 5
+    notif.serialize_for_csv.return_value = {
+        "recipient": "1234567890",
+        "template_name": "Test Template",
+        "created_by_name": "Tester",
+        "carrier": "TestCarrier",
+        "status": "delivered",
+        "created_at": "2025-08-10T12:00:00",
+        "job_name": "Job A",
+        "provider_response": "Success",
+    }
+    return notif
+
+
+@patch("app.dao.notifications_dao.get_notifications_for_service")
+@patch("app.aws.s3.get_personalisation_from_s3")
+@patch("app.aws.s3.get_phone_number_from_s3")
+@patch("app.celery.tasks.get_csv_location")
+@patch("app.aws.s3.s3upload")
+@patch("app.aws.s3.delete_s3_object")
+@patch("app.celery.tasks.current_app")
+def test_generate_notifications_report_normal_case(
+    mock_current_app,
+    mock_delete,
+    mock_upload,
+    mock_get_csv_location,
+    mock_get_phone_number,
+    mock_get_personalisation,
+    mock_get_notifications,
+    notify_api,
+):
+
+    mock_get_notifications.return_value.items = [get_mock_notification()]
+    mock_get_phone_number.return_value = "1234567890"
+    mock_get_personalisation.return_value = {"name": "John"}
+    mock_get_csv_location.return_value = (
+        "my-bucket",
+        "some/file/location.csv",
+        "access",
+        "sekret",
+        "region",
+    )
+
+    mock_current_app.config = {
+        "CSV_UPLOAD_BUCKET": {"bucket": "my-bucket", "region": "region"}
+    }
+
+    _generate_notifications_report("service-id", "report-id", 7)
+
+    mock_get_personalisation.assert_called_once()
+    mock_get_phone_number.assert_called_once()
+
+    mock_upload.assert_called_once()
+    args, kwargs = mock_upload.call_args
+    assert kwargs["bucket_name"] == "my-bucket"
+    assert kwargs["file_location"] == "some/file/location.csv"
+    assert isinstance(kwargs["filedata"], io.BytesIO)
+
+
+@patch("app.aws.s3.delete_s3_object")
+@patch("app.celery.tasks.get_csv_location")
+@patch("app.dao.notifications_dao.get_notifications_for_service")
+@patch("app.celery.tasks.current_app")
+def test_generate_notifications_report_no_notifications(
+    mock_current_app,
+    mock_get_notifications,
+    mock_get_csv_location,
+    mock_delete_s3,
+    notify_api,
+):
+    mock_get_notifications.return_value.items = []
+    mock_get_csv_location.return_value = (
+        "bucket",
+        "service-id-service-notify/report-id.csv",
+        "access",
+        "secret",
+        "region",
+    )
+
+    _generate_notifications_report("service-id", "report-id", 7)
+
+    mock_current_app.logger.info.assert_any_call("SKIP service-id")
+    mock_delete_s3.assert_called_once_with("service-id-service-notify/report-id.csv")
+    mock_current_app.logger.info.assert_any_call(
+        "Deleted stale report service-id-service-notify/report-id.csv - no new data"
+    )

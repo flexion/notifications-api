@@ -6,8 +6,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from freezegun import freeze_time
+from hypothesis import given, settings
+from hypothesis import strategies as st
+from sqlalchemy.exc import SQLAlchemyError
 
 import app.celery.tasks
+from app import db
 from app.dao.templates_dao import dao_update_template
 from app.enums import (
     JobStatus,
@@ -68,6 +72,49 @@ def test_cancel_job(client, sample_scheduled_job):
     resp_json = json.loads(response.get_data(as_text=True))
     assert resp_json["data"]["id"] == job_id
     assert resp_json["data"]["job_status"] == JobStatus.CANCELLED
+
+
+uuid_str_strategy = st.one_of(
+    st.just(str(uuid.uuid4())), st.text(min_size=1, max_size=36)
+)
+
+
+@pytest.mark.usefixtures("client", "sample_scheduled_job")
+@settings(max_examples=10)
+@given(fuzzed_job_id=uuid_str_strategy, fuzzed_service_id=uuid_str_strategy)
+def test_fuzz_cancel_job(fuzzed_job_id, fuzzed_service_id, request):
+    client = request.getfixturevalue("client")
+    sample_scheduled_job = request.getfixturevalue("sample_scheduled_job")
+    valid_job_id = str(sample_scheduled_job.id)
+    valid_service_id = str(sample_scheduled_job.service.id)
+    job_id = fuzzed_job_id
+    service_id = fuzzed_service_id
+
+    path = f"/service/{service_id}/job/{job_id}/cancel"
+    auth_header = create_admin_authorization_header()
+    try:
+        response = client.post(path, headers=[auth_header])
+    except SQLAlchemyError:
+        db.session.rollback()
+        raise
+
+    status = response.status_code
+    # 400 Bad Request, 403 Forbidden, 404 Not Found
+    # 405 Method Not Allowed (if ids are not ascii)
+    assert status in (
+        200,
+        400,
+        403,
+        404,
+        405,
+    ), f"Unexpected status: {status} for path: {path}"
+    # This will only happen once every trillion years
+    if status == 200:
+        assert job_id == valid_job_id
+        assert service_id == valid_service_id
+        resp_json = json.loads(response.get_data(as_text=True))
+        assert resp_json["data"]["id"] == valid_job_id
+        assert resp_json["data"]["job_status"] == JobStatus.CANCELLED
 
 
 def test_cant_cancel_normal_job(client, sample_job, mocker):
@@ -459,11 +506,18 @@ def _setup_jobs(template, number_of_jobs=5):
 def test_get_all_notifications_for_job_in_order_of_job_number(
     admin_request, sample_template, mocker
 ):
-    mock_s3 = mocker.patch("app.job.rest.get_phone_number_from_s3")
-    mock_s3.return_value = "15555555555"
 
-    mock_s3_personalisation = mocker.patch("app.job.rest.get_personalisation_from_s3")
-    mock_s3_personalisation.return_value = {}
+    mock_job = mocker.patch("app.job.rest.get_job_from_s3")
+    mock_job.return_value = None
+    mock_s3 = mocker.patch("app.job.rest.extract_phones")
+    mock_s3.return_value = {
+        0: "15555555555",
+        1: "15555555555",
+        2: "15555555555",
+        3: "15555555555",
+    }
+    mock_s3_personalisation = mocker.patch("app.job.rest.extract_personalisation")
+    mock_s3_personalisation.return_value = {0: "", 1: "", 2: "", 3: ""}
 
     main_job = create_job(sample_template)
     another_job = create_job(sample_template)
@@ -531,12 +585,17 @@ def test_get_recent_notifications_for_job_in_reverse_order_of_job_number(
 
 
 @pytest.mark.parametrize(
-    "expected_notification_count, status_args",
+    "expected_notification_count, status_args, expected_phones, expected_personalisation",
     [
-        (1, [NotificationStatus.CREATED]),
-        (0, [NotificationStatus.SENDING]),
-        (1, [NotificationStatus.CREATED, NotificationStatus.SENDING]),
-        (0, [NotificationStatus.SENDING, NotificationStatus.DELIVERED]),
+        (1, [NotificationStatus.CREATED], {0: "15555555555"}, {0: ""}),
+        (0, [NotificationStatus.SENDING], {}, {}),
+        (
+            1,
+            [NotificationStatus.CREATED, NotificationStatus.SENDING],
+            {0: "15555555555"},
+            {0: ""},
+        ),
+        (0, [NotificationStatus.SENDING, NotificationStatus.DELIVERED], {}, {}),
     ],
 )
 def test_get_all_notifications_for_job_filtered_by_status(
@@ -544,15 +603,24 @@ def test_get_all_notifications_for_job_filtered_by_status(
     sample_job,
     expected_notification_count,
     status_args,
+    expected_phones,
+    expected_personalisation,
     mocker,
 ):
-    mock_s3 = mocker.patch("app.job.rest.get_phone_number_from_s3")
-    mock_s3.return_value = "15555555555"
 
-    mock_s3_personalisation = mocker.patch("app.job.rest.get_personalisation_from_s3")
-    mock_s3_personalisation.return_value = {}
+    mock_job = mocker.patch("app.job.rest.get_job_from_s3")
+    mock_job.return_value = None
+    mock_s3 = mocker.patch("app.job.rest.extract_phones")
+    mock_s3.return_value = expected_phones
+    mock_s3_personalisation = mocker.patch("app.job.rest.extract_personalisation")
+    mock_s3_personalisation.return_value = expected_personalisation
 
-    create_notification(job=sample_job, to_field="1", status=NotificationStatus.CREATED)
+    create_notification(
+        job=sample_job,
+        job_row_number=0,
+        to_field="1",
+        status=NotificationStatus.CREATED,
+    )
 
     resp = admin_request.get(
         "job.get_all_notifications_for_service_job",
@@ -566,11 +634,14 @@ def test_get_all_notifications_for_job_filtered_by_status(
 def test_get_all_notifications_for_job_returns_correct_format(
     admin_request, sample_notification_with_job, mocker
 ):
-    mock_s3 = mocker.patch("app.job.rest.get_phone_number_from_s3")
-    mock_s3.return_value = "15555555555"
 
-    mock_s3_personalisation = mocker.patch("app.job.rest.get_personalisation_from_s3")
-    mock_s3_personalisation.return_value = {}
+    mock_job = mocker.patch("app.job.rest.get_job_from_s3")
+    mock_job.return_value = None
+    mock_s3 = mocker.patch("app.job.rest.extract_phones")
+    mock_s3.return_value = {0: "15555555555"}
+    mock_s3_personalisation = mocker.patch("app.job.rest.extract_personalisation")
+    mock_s3_personalisation.return_value = {0: ""}
+    sample_notification_with_job.job_row_number = 0
 
     service_id = sample_notification_with_job.service_id
     job_id = sample_notification_with_job.job_id
@@ -943,11 +1014,13 @@ def create_10_jobs(template):
 def test_get_all_notifications_for_job_returns_csv_format(
     admin_request, sample_notification_with_job, mocker
 ):
-    mock_s3 = mocker.patch("app.job.rest.get_phone_number_from_s3")
-    mock_s3.return_value = "15555555555"
-
-    mock_s3_personalisation = mocker.patch("app.job.rest.get_personalisation_from_s3")
-    mock_s3_personalisation.return_value = {}
+    mock_job = mocker.patch("app.job.rest.get_job_from_s3")
+    mock_job.return_value = None
+    mock_s3 = mocker.patch("app.job.rest.extract_phones")
+    mock_s3.return_value = {0: "15555555555"}
+    mock_s3_personalisation = mocker.patch("app.job.rest.extract_personalisation")
+    mock_s3_personalisation.return_value = {0: ""}
+    sample_notification_with_job.job_row_number = 0
 
     resp = admin_request.get(
         "job.get_all_notifications_for_service_job",
@@ -955,7 +1028,6 @@ def test_get_all_notifications_for_job_returns_csv_format(
         job_id=sample_notification_with_job.job_id,
         format_for_csv=True,
     )
-
     assert len(resp["notifications"]) == 1
     assert set(resp["notifications"][0].keys()) == {
         "created_at",
@@ -1043,16 +1115,30 @@ def test_get_jobs_should_retrieve_from_ft_notification_status_for_old_jobs(
         service_id=sample_template.service_id,
     )
 
-    assert resp_json["data"][0]["id"] == str(job_3.id)
-    assert resp_json["data"][0]["statistics"] == []
-    assert resp_json["data"][1]["id"] == str(job_2.id)
-    assert resp_json["data"][1]["statistics"] == [
-        {"status": NotificationStatus.CREATED, "count": 1},
-    ]
-    assert resp_json["data"][2]["id"] == str(job_1.id)
-    assert resp_json["data"][2]["statistics"] == [
-        {"status": NotificationStatus.DELIVERED, "count": 6},
-    ]
+    returned_jobs = resp_json["data"]
+
+    expected_jobs = [job_3, job_2, job_1]
+    expected_order = sorted(
+        expected_jobs,
+        key=lambda job: ((job.processing_started or job.created_at), str(job.id)),
+        reverse=True,
+    )
+    expected_ids = [str(job.id) for job in expected_order]
+    returned_ids = [job["id"] for job in returned_jobs if job["id"] in expected_ids]
+    assert returned_ids == expected_ids
+
+    for job in expected_jobs:
+        idx = returned_ids.index(str(job.id))
+        if job is job_3:
+            assert returned_jobs[idx]["statistics"] == []
+        elif job is job_2:
+            assert returned_jobs[idx]["statistics"] == [
+                {"status": NotificationStatus.CREATED, "count": 1},
+            ]
+        elif job is job_1:
+            assert returned_jobs[idx]["statistics"] == [
+                {"status": NotificationStatus.DELIVERED, "count": 6},
+            ]
 
 
 @freeze_time("2017-07-17 07:17")
@@ -1127,3 +1213,132 @@ def test_get_scheduled_job_stats(admin_request):
         "count": 1,
         "soonest_scheduled_for": "2017-07-17T11:00:00+00:00",
     }
+
+
+def test_get_job_status_returns_light_response(admin_request, sample_job):
+    """Test that the status endpoint returns only required fields."""
+    job_id = str(sample_job.id)
+    service_id = sample_job.service.id
+
+    sample_job.notification_count = 5
+
+    create_notification(job=sample_job, status=NotificationStatus.SENT)
+    create_notification(job=sample_job, status=NotificationStatus.DELIVERED)
+    create_notification(job=sample_job, status=NotificationStatus.FAILED)
+
+    resp_json = admin_request.get(
+        "job.get_job_status",
+        service_id=service_id,
+        job_id=job_id,
+    )
+
+    assert set(resp_json.keys()) == {
+        "total",
+        "delivered",
+        "failed",
+        "pending",
+        "finished",
+    }
+
+    assert resp_json["total"] == 5
+    assert resp_json["delivered"] == 2  # sent + delivered
+    assert resp_json["failed"] == 1
+    assert resp_json["pending"] == 2  # total - delivered - failed
+    assert resp_json["finished"] is False
+
+
+def test_get_job_status_counts_all_delivered_statuses(admin_request, sample_job):
+    """Test that delivered count includes both 'delivered' and 'sent' statuses."""
+    job_id = str(sample_job.id)
+    service_id = sample_job.service.id
+
+    sample_job.notification_count = 4
+
+    create_notification(job=sample_job, status=NotificationStatus.SENT)
+    create_notification(job=sample_job, status=NotificationStatus.SENT)
+    create_notification(job=sample_job, status=NotificationStatus.DELIVERED)
+    create_notification(job=sample_job, status=NotificationStatus.DELIVERED)
+
+    resp_json = admin_request.get(
+        "job.get_job_status",
+        service_id=service_id,
+        job_id=job_id,
+    )
+
+    assert resp_json["delivered"] == 4
+    assert resp_json["failed"] == 0
+    assert resp_json["pending"] == 0
+
+
+def test_get_job_status_counts_all_failed_statuses(admin_request, sample_job):
+    """Test that failed count includes all failure status types."""
+    job_id = str(sample_job.id)
+    service_id = sample_job.service.id
+
+    sample_job.notification_count = 6
+
+    create_notification(job=sample_job, status=NotificationStatus.FAILED)
+    create_notification(job=sample_job, status=NotificationStatus.TECHNICAL_FAILURE)
+    create_notification(job=sample_job, status=NotificationStatus.TEMPORARY_FAILURE)
+    create_notification(job=sample_job, status=NotificationStatus.PERMANENT_FAILURE)
+    create_notification(job=sample_job, status=NotificationStatus.VALIDATION_FAILED)
+    create_notification(job=sample_job, status=NotificationStatus.VIRUS_SCAN_FAILED)
+
+    resp_json = admin_request.get(
+        "job.get_job_status",
+        service_id=service_id,
+        job_id=job_id,
+    )
+
+    assert resp_json["delivered"] == 0
+    assert resp_json["failed"] == 6
+    assert resp_json["pending"] == 0
+
+
+def test_get_job_status_finished_when_processing_complete_and_no_pending(
+    admin_request, sample_job
+):
+    """Test that finished is True only when processing_finished is set and pending is 0."""
+    from app.utils import utc_now
+
+    job_id = str(sample_job.id)
+    service_id = sample_job.service.id
+
+    sample_job.notification_count = 2
+    sample_job.processing_finished = utc_now()
+
+    create_notification(job=sample_job, status=NotificationStatus.DELIVERED)
+    create_notification(job=sample_job, status=NotificationStatus.DELIVERED)
+
+    resp_json = admin_request.get(
+        "job.get_job_status",
+        service_id=service_id,
+        job_id=job_id,
+    )
+
+    assert resp_json["pending"] == 0
+    assert resp_json["finished"] is True
+
+
+def test_get_job_status_not_finished_when_pending_exists(admin_request, sample_job):
+    """Test that finished is False when there are still pending notifications."""
+    from app.utils import utc_now
+
+    job_id = str(sample_job.id)
+    service_id = sample_job.service.id
+
+    sample_job.notification_count = 5
+    sample_job.processing_finished = utc_now()
+
+    create_notification(job=sample_job, status=NotificationStatus.DELIVERED)
+
+    resp_json = admin_request.get(
+        "job.get_job_status",
+        service_id=service_id,
+        job_id=job_id,
+    )
+
+    assert resp_json["pending"] == 4
+    assert (
+        resp_json["finished"] is False
+    )  # Still has pending even though processing_finished is set

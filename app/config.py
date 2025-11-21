@@ -123,10 +123,6 @@ class Config(object):
     # Logging
     DEBUG = False
 
-    # Monitoring
-    CRONITOR_ENABLED = False
-    CRONITOR_KEYS = json.loads(getenv("CRONITOR_KEYS", "{}"))
-
     # Antivirus
     ANTIVIRUS_ENABLED = getenv("ANTIVIRUS_ENABLED", "1") == "1"
 
@@ -290,6 +286,11 @@ class Config(object):
                 "schedule": crontab(minute="*/30"),
                 "options": {"queue": QueueNames.PERIODIC},
             },
+            "generate-notifications-reports": {
+                "task": "generate-notifications-reports",
+                "schedule": crontab(hour=1, minute=0),
+                "options": {"queue": QueueNames.PERIODIC},
+            },
             "regenerate-job-cache-on-startup": {
                 "task": "regenerate-job-cache",
                 "schedule": crontab(
@@ -310,8 +311,8 @@ class Config(object):
                 "schedule": crontab(hour=4, minute=5),
                 "options": {"queue": QueueNames.PERIODIC},
             },
-            "remove_sms_email_jobs": {
-                "task": "remove_sms_email_jobs",
+            "remove-sms-email-jobs": {
+                "task": "remove-sms-email-jobs",
                 "schedule": crontab(hour=8, minute=0),
                 "options": {"queue": QueueNames.PERIODIC},
             },
@@ -339,7 +340,7 @@ class Config(object):
 
     FREE_SMS_TIER_FRAGMENT_COUNT = 250000
 
-    TOTAL_MESSAGE_LIMIT = 100000
+    TOTAL_MESSAGE_LIMIT = 5000000
 
     DAILY_MESSAGE_LIMIT = notifications_utils.DAILY_MESSAGE_LIMIT
 
@@ -407,8 +408,7 @@ class Production(Config):
         f"notify-api-csv-upload-bucket-{Config.NOTIFY_ENVIRONMENT}"
     )
 
-    FROM_NUMBER = "Flexion Messaging"
-    CRONITOR_ENABLED = True
+    FROM_NUMBER = "Notify.gov"
 
 
 class Staging(Production):
